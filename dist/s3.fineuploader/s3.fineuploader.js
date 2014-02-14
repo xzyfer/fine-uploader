@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 4.1.1
+* Version: 4.2.2
 *
 * Homepage: http://fineuploader.com
 *
@@ -224,7 +224,7 @@ var qq = function(element) {
      */
     qq.isArray = function(value) {
         return Object.prototype.toString.call(value) === "[object Array]" ||
-            (window.ArrayBuffer && value.buffer && value.buffer.constructor === ArrayBuffer);
+            (value && window.ArrayBuffer && value.buffer && value.buffer.constructor === ArrayBuffer);
     };
 
     // Looks for an object on a `DataTransfer` object that is associated with drop events when utilizing the Filesystem API.
@@ -790,6 +790,22 @@ var qq = function(element) {
         }
     };
 
+    qq.getFilename = function(blobOrFileInput) {
+        /*jslint regexp: true*/
+
+        if (qq.isInput(blobOrFileInput)) {
+            // get input value and remove path to normalize
+            return blobOrFileInput.value.replace(/.*(\/|\\)/, "");
+        }
+        else if (qq.isFile(blobOrFileInput)) {
+            if (blobOrFileInput.fileName !== null && blobOrFileInput.fileName !== undefined) {
+                return blobOrFileInput.fileName;
+            }
+        }
+
+        return blobOrFileInput.name;
+    };
+
     /**
      * A generic module which supports object disposing in dispose() method.
      * */
@@ -839,7 +855,7 @@ var qq = function(element) {
 }());
 
 /*global qq */
-qq.version="4.1.1";
+qq.version="4.2.2";
 
 /* globals qq */
 qq.supportedFeatures = (function () {
@@ -994,8 +1010,8 @@ qq.Promise = function() {
                     failureCallbacks.push(onFailure);
                 }
             }
-            else if (state === -1 && onFailure) {
-                onFailure.apply(null, failureArgs);
+            else if (state === -1) {
+                onFailure && onFailure.apply(null, failureArgs);
             }
             else if (onSuccess) {
                 onSuccess.apply(null,successArgs);
@@ -1230,23 +1246,22 @@ qq.UploadData = function(uploaderProxy) {
     "use strict";
 
     var data = [],
-        byId = {},
         byUuid = {},
         byStatus = {};
 
 
-    function getDataByIds(ids) {
-        if (qq.isArray(ids)) {
+    function getDataByIds(idOrIds) {
+        if (qq.isArray(idOrIds)) {
             var entries = [];
 
-            qq.each(ids, function(idx, id) {
-                entries.push(data[byId[id]]);
+            qq.each(idOrIds, function(idx, id) {
+                entries.push(data[id]);
             });
 
             return entries;
         }
 
-        return data[byId[ids]];
+        return data[idOrIds];
     }
 
     function getDataByUuids(uuids) {
@@ -1281,14 +1296,19 @@ qq.UploadData = function(uploaderProxy) {
     }
 
     qq.extend(this, {
-        added: function(id) {
-            var uuid = uploaderProxy.getUuid(id),
-                name = uploaderProxy.getName(id),
-                size = uploaderProxy.getSize(id),
-                status = qq.status.SUBMITTING;
+        /**
+         * Adds a new file to the data cache for tracking purposes.
+         *
+         * @param uuid Initial UUID for this file.
+         * @param name Initial name of this file.
+         * @param size Size of this file, -1 if this cannot be determined
+         * @param status Initial `qq.status` for this file.  If null/undefined, `qq.status.SUBMITTING`.
+         * @returns {number} Internal ID for this file.
+         */
+        addFile: function(uuid, name, size, status) {
+            status = status || qq.status.SUBMITTING;
 
-            var index = data.push({
-                id: id,
+            var id = data.push({
                 name: name,
                 originalName: name,
                 uuid: uuid,
@@ -1296,16 +1316,17 @@ qq.UploadData = function(uploaderProxy) {
                 status: status
             }) - 1;
 
-            byId[id] = index;
-
-            byUuid[uuid] = index;
+            data[id].id = id;
+            byUuid[uuid] = id;
 
             if (byStatus[status] === undefined) {
                 byStatus[status] = [];
             }
-            byStatus[status].push(index);
+            byStatus[status].push(id);
 
-            uploaderProxy.onStatusChange(id, undefined, status);
+            uploaderProxy.onStatusChange(id, null, status);
+
+            return id;
         },
 
         retrieve: function(optionalFilter) {
@@ -1329,41 +1350,36 @@ qq.UploadData = function(uploaderProxy) {
 
         reset: function() {
             data = [];
-            byId = {};
             byUuid = {};
             byStatus = {};
         },
 
         setStatus: function(id, newStatus) {
-            var dataIndex = byId[id],
-                oldStatus = data[dataIndex].status,
-                byStatusOldStatusIndex = qq.indexOf(byStatus[oldStatus], dataIndex);
+            var oldStatus = data[id].status,
+                byStatusOldStatusIndex = qq.indexOf(byStatus[oldStatus], id);
 
             byStatus[oldStatus].splice(byStatusOldStatusIndex, 1);
 
-            data[dataIndex].status = newStatus;
+            data[id].status = newStatus;
 
             if (byStatus[newStatus] === undefined) {
                 byStatus[newStatus] = [];
             }
-            byStatus[newStatus].push(dataIndex);
+            byStatus[newStatus].push(id);
 
             uploaderProxy.onStatusChange(id, oldStatus, newStatus);
         },
 
         uuidChanged: function(id, newUuid) {
-            var dataIndex = byId[id],
-                oldUuid = data[dataIndex].uuid;
+            var oldUuid = data[id].uuid;
 
-            data[dataIndex].uuid = newUuid;
-            byUuid[newUuid] = dataIndex;
+            data[id].uuid = newUuid;
+            byUuid[newUuid] = id;
             delete byUuid[oldUuid];
         },
 
-        nameChanged: function(id, newName) {
-            var dataIndex = byId[id];
-
-            data[dataIndex].name = newName;
+        updateName: function(id, newName) {
+            data[id].name = newName;
         }
     });
 };
@@ -1456,7 +1472,7 @@ qq.status = {
             else {
                 while (this._storedIds.length) {
                     idToUpload = this._storedIds.shift();
-                    this._handler.upload(idToUpload);
+                    this._uploadFile(idToUpload);
                 }
             }
         },
@@ -1506,14 +1522,12 @@ qq.status = {
             this._uploadData.reset();
             this._buttonIdsForFileIds = [];
 
-            if (this._pasteHandler) {
-                this._pasteHandler.reset();
-            }
+            this._pasteHandler && this._pasteHandler.reset();
+            this._options.session.refreshOnReset && this._refreshSessionData();
         },
 
         addFiles: function(filesOrInputs, params, endpoint) {
-            var self = this,
-                verifiedFilesOrInputs = [],
+            var verifiedFilesOrInputs = [],
                 fileOrInputIndex, fileOrInput, fileIndex;
 
             if (filesOrInputs) {
@@ -1527,15 +1541,15 @@ qq.status = {
                     if (qq.isFileOrInput(fileOrInput)) {
                         if (qq.isInput(fileOrInput) && qq.supportedFeatures.ajaxUploading) {
                             for (fileIndex = 0; fileIndex < fileOrInput.files.length; fileIndex++) {
-                                verifiedFilesOrInputs.push(fileOrInput.files[fileIndex]);
+                                this._handleNewFile(fileOrInput.files[fileIndex], verifiedFilesOrInputs);
                             }
                         }
                         else {
-                            verifiedFilesOrInputs.push(fileOrInput);
+                            this._handleNewFile(fileOrInput, verifiedFilesOrInputs);
                         }
                     }
                     else {
-                        self.log(fileOrInput + " is not a File or INPUT element!  Ignoring!", "warn");
+                        this.log(fileOrInput + " is not a File or INPUT element!  Ignoring!", "warn");
                     }
                 }
 
@@ -1551,18 +1565,22 @@ qq.status = {
                     self = this;
 
                 qq.each(blobDataArray, function(idx, blobData) {
+                    var blobOrBlobData;
+
                     if (qq.isBlob(blobData) && !qq.isFileOrInput(blobData)) {
-                        verifiedBlobDataList.push({
+                        blobOrBlobData = {
                             blob: blobData,
                             name: self._options.blobs.defaultName
-                        });
+                        };
                     }
                     else if (qq.isObject(blobData) && blobData.blob && blobData.name) {
-                        verifiedBlobDataList.push(blobData);
+                        blobOrBlobData = blobData;
                     }
                     else {
                         self.log("addBlobs: entry at index " + idx + " is not a Blob or a BlobData object", "error");
                     }
+
+                    blobOrBlobData && self._handleNewFile(blobOrBlobData, verifiedBlobDataList);
                 });
 
                 this._prepareItemsForUpload(verifiedBlobDataList, params, endpoint);
@@ -1573,11 +1591,11 @@ qq.status = {
         },
 
         getUuid: function(id) {
-            return this._handler.getUuid(id);
+            return this._uploadData.retrieve({id: id}).uuid;
         },
 
         setUuid: function(id, newUuid) {
-            return this._handler.setUuid(id, newUuid);
+            return this._uploadData.uuidChanged(id, newUuid);
         },
 
         getResumableFilesData: function() {
@@ -1585,16 +1603,15 @@ qq.status = {
         },
 
         getSize: function(id) {
-            return this._handler.getSize(id);
+            return this._uploadData.retrieve({id: id}).size;
         },
 
         getName: function(id) {
-            return this._handler.getName(id);
+            return this._uploadData.retrieve({id: id}).name;
         },
 
         setName: function(id, newName) {
-            this._handler.setName(id, newName);
-            this._uploadData.nameChanged(id, newName);
+            this._uploadData.updateName(id, newName);
         },
 
         getFile: function(fileOrBlobId) {
@@ -1687,10 +1704,7 @@ qq.status = {
 
             if (uploadData.status === qq.status.PAUSED) {
                 qq.log(qq.format("Paused file ID {} ({}) will be continued.  Not paused.", id, this.getName(id)));
-
-                if (!this._handler.upload(id)) {
-                    this._uploadData.setStatus(id, qq.status.QUEUED);
-                }
+                this._uploadFile(id);
                 return true;
             }
             else {
@@ -1718,6 +1732,83 @@ qq.status = {
      * Defines the private (internal) API for FineUploaderBasic mode.
      */
     qq.basePrivateApi = {
+        _uploadFile: function(id) {
+            if (!this._handler.upload(id)) {
+                this._uploadData.setStatus(id, qq.status.QUEUED);
+            }
+        },
+
+        // Attempts to refresh session data only if the `qq.Session` module exists
+        // and a session endpoint has been specified.  The `onSessionRequestComplete`
+        // callback will be invoked once the refresh is complete.
+        _refreshSessionData: function() {
+            var self = this,
+                options = this._options.session;
+
+            /* jshint eqnull:true */
+            if (qq.Session && this._options.session.endpoint != null) {
+                if (!this._session) {
+                    qq.extend(options, this._options.cors);
+
+                    options.log = qq.bind(this.log, this);
+                    options.addFileRecord = qq.bind(this._addCannedFile, this);
+
+                    this._session = new qq.Session(options);
+                }
+
+                setTimeout(function() {
+                    self._session.refresh().then(function(response, xhrOrXdr) {
+
+                        self._options.callbacks.onSessionRequestComplete(response, true, xhrOrXdr);
+
+                    }, function(response, xhrOrXdr) {
+
+                        self._options.callbacks.onSessionRequestComplete(response, false, xhrOrXdr);
+                    });
+                }, 0);
+            }
+        },
+
+        // Updates internal state with a file record (not backed by a live file).  Returns the assigned ID.
+        _addCannedFile: function(sessionData) {
+            var id = this._uploadData.addFile(sessionData.uuid, sessionData.name, sessionData.size,
+                qq.status.UPLOAD_SUCCESSFUL);
+
+            sessionData.deleteFileEndpoint && this.setDeleteFileEndpoint(sessionData.deleteFileEndpoint, id);
+            sessionData.deleteFileParams && this.setDeleteFileParams(sessionData.deleteFileParams, id);
+
+            if (sessionData.thumbnailUrl) {
+                this._thumbnailUrls[id] = sessionData.thumbnailUrl;
+            }
+
+            this._netUploaded++;
+            this._netUploadedOrQueued++;
+
+            return id;
+        },
+
+        // Updates internal state when a new file has been received, and adds it along with its ID to a passed array.
+        _handleNewFile: function(file, newFileWrapperList) {
+            var size = -1,
+                uuid = qq.getUniqueId(),
+                name = qq.getFilename(file),
+                id;
+
+            if (file.size >= 0) {
+                size = file.size;
+            }
+            else if (file.blob) {
+                size = file.blob.size;
+            }
+
+            id = this._uploadData.addFile(uuid, name, size);
+            this._handler.add(id, file);
+
+            this._netUploadedOrQueued++;
+
+            newFileWrapperList.push({id: id, file: file});
+        },
+
         // Creates an internal object that tracks various properties of each extra button,
         // and then actually creates the extra button.
         _generateExtraButtonSpecs: function() {
@@ -1908,7 +1999,6 @@ qq.status = {
                 options = {
                     debug: this._options.debug,
                     maxConnections: this._options.maxConnections,
-                    inputName: this._options.request.inputName,
                     cors: this._options.cors,
                     demoMode: this._options.demoMode,
                     paramsStore: this._paramsStore,
@@ -1961,8 +2051,12 @@ qq.status = {
                         return self._onAutoRetry.apply(self, arguments);
                     },
                     onUuidChanged: function(id, newUuid) {
-                        self._uploadData.uuidChanged(id, newUuid);
-                    }
+                        self.log("Server requested UUID change from '" + self.getUuid(id) + "' to '" + newUuid + "'");
+                        self.setUuid(id, newUuid);
+                    },
+                    getName: qq.bind(self.getName, self),
+                    getUuid: qq.bind(self.getUuid, self),
+                    getSize: qq.bind(self.getSize, self)
                 };
 
             qq.each(this._options.request, function(prop, val) {
@@ -2081,7 +2175,7 @@ qq.status = {
         },
 
         _onSubmit: function(id, name) {
-            this._netUploadedOrQueued++;
+            //nothing to do yet in core uploader
         },
 
         _onProgress: function(id, name, loaded, total) {
@@ -2169,7 +2263,7 @@ qq.status = {
         },
 
         _onDeleteComplete: function(id, xhrOrXdr, isError) {
-            var name = this._handler.getName(id);
+            var name = this.getName(id);
 
             if (isError) {
                 this._uploadData.setStatus(id, qq.status.DELETE_FAILED);
@@ -2291,7 +2385,7 @@ qq.status = {
                 return false;
             }
             else if (this._handler.isValid(id)) {
-                var fileName = this._handler.getName(id);
+                var fileName = this.getName(id);
 
                 if (this._options.callbacks.onManualRetry(id, fileName) === false) {
                     return false;
@@ -2352,22 +2446,20 @@ qq.status = {
 
         _prepareItemsForUpload: function(items, params, endpoint) {
             var validationDescriptors = this._getValidationDescriptors(items),
-                buttonId = this._getButtonId(items[0]),
+                buttonId = this._getButtonId(items[0].file),
                 button = this._getButton(buttonId);
 
             this._handleCheckedCallback({
                 name: "onValidateBatch",
                 callback: qq.bind(this._options.callbacks.onValidateBatch, this, validationDescriptors, button),
                 onSuccess: qq.bind(this._onValidateBatchCallbackSuccess, this, validationDescriptors, items, params, endpoint, button),
+                onFailure: qq.bind(this._onValidateBatchCallbackFailure, this, items),
                 identifier: "batch validation"
             });
         },
 
-        _upload: function(blobOrFileContainer, params, endpoint) {
-            var id = this._handler.add(blobOrFileContainer),
-                name = this._handler.getName(id);
-
-            this._uploadData.added(id);
+        _upload: function(id, params, endpoint) {
+            var name = this.getName(id);
 
             if (params) {
                 this.setParams(params, id);
@@ -2406,9 +2498,7 @@ qq.status = {
             this._options.callbacks.onSubmitted.apply(this, arguments);
 
             if (this._options.autoUpload) {
-                if (!this._handler.upload(id)) {
-                    this._uploadData.setStatus(id, qq.status.QUEUED);
-                }
+                this._uploadFile(id);
             }
             else {
                 this._storeForLater(id);
@@ -2426,7 +2516,7 @@ qq.status = {
         _onValidateBatchCallbackSuccess: function(validationDescriptors, items, params, endpoint, button) {
             var errorMessage,
                 itemLimit = this._options.validation.itemLimit,
-                proposedNetFilesUploadedOrQueued = this._netUploadedOrQueued + validationDescriptors.length;
+                proposedNetFilesUploadedOrQueued = this._netUploadedOrQueued;
 
             if (itemLimit === 0 || proposedNetFilesUploadedOrQueued <= itemLimit) {
                 if (items.length > 0) {
@@ -2435,7 +2525,7 @@ qq.status = {
                         callback: qq.bind(this._options.callbacks.onValidate, this, validationDescriptors[0], button),
                         onSuccess: qq.bind(this._onValidateCallbackSuccess, this, items, 0, params, endpoint),
                         onFailure: qq.bind(this._onValidateCallbackFailure, this, items, 0, params, endpoint),
-                        identifier: "Item '" + items[0].name + "', size: " + items[0].size
+                        identifier: "Item '" + items[0].file.name + "', size: " + items[0].file.size
                     });
                 }
                 else {
@@ -2443,6 +2533,7 @@ qq.status = {
                 }
             }
             else {
+                this._onValidateBatchCallbackFailure(items);
                 errorMessage = this._options.messages.tooManyItemsError
                     .replace(/\{netItems\}/g, proposedNetFilesUploadedOrQueued)
                     .replace(/\{itemLimit\}/g, itemLimit);
@@ -2450,15 +2541,23 @@ qq.status = {
             }
         },
 
+        _onValidateBatchCallbackFailure: function(fileWrappers) {
+            var self = this;
+
+            qq.each(fileWrappers, function(idx, fileWrapper) {
+                self._fileOrBlobRejected(fileWrapper.id);
+            });
+        },
+
         _onValidateCallbackSuccess: function(items, index, params, endpoint) {
             var self = this,
                 nextIndex = index+1,
-                validationDescriptor = this._getValidationDescriptor(items[index]);
+                validationDescriptor = this._getValidationDescriptor(items[index].file);
 
             this._validateFileOrBlobData(items[index], validationDescriptor)
                 .then(
                     function() {
-                        self._upload(items[index], params, endpoint);
+                        self._upload(items[index].id, params, endpoint);
                         self._maybeProcessNextItemAfterOnValidateCallback(true, items, nextIndex, params, endpoint);
                     },
                     function() {
@@ -2470,7 +2569,7 @@ qq.status = {
         _onValidateCallbackFailure: function(items, index, params, endpoint) {
             var nextIndex = index+ 1;
 
-            this._fileOrBlobRejected(null, items[0].name);
+            this._fileOrBlobRejected(items[0].id, items[0].file.name);
 
             this._maybeProcessNextItemAfterOnValidateCallback(false, items, nextIndex, params, endpoint);
         },
@@ -2482,16 +2581,21 @@ qq.status = {
                 if (validItem || !this._options.validation.stopOnFirstInvalidFile) {
                     //use setTimeout to prevent a stack overflow with a large number of files in the batch & non-promissory callbacks
                     setTimeout(function() {
-                        var validationDescriptor = self._getValidationDescriptor(items[index]);
+                        var validationDescriptor = self._getValidationDescriptor(items[index].file);
 
                         self._handleCheckedCallback({
                             name: "onValidate",
-                            callback: qq.bind(self._options.callbacks.onValidate, self, items[index]),
+                            callback: qq.bind(self._options.callbacks.onValidate, self, items[index].file),
                             onSuccess: qq.bind(self._onValidateCallbackSuccess, self, items, index, params, endpoint),
                             onFailure: qq.bind(self._onValidateCallbackFailure, self, items, index, params, endpoint),
                             identifier: "Item '" + validationDescriptor.name + "', size: " + validationDescriptor.size
                         });
                     }, 0);
+                }
+                else if (!validItem) {
+                    for (; index < items.length; index++) {
+                        self._fileOrBlobRejected(items[index].id);
+                    }
                 }
             }
         },
@@ -2499,50 +2603,51 @@ qq.status = {
         /**
          * Performs some internal validation checks on an item, defined in the `validation` option.
          *
-         * @param item `File`, `Blob`, or `<input type="file">`
+         * @param fileWrapper Wrapper containing a `file` along with an `id`
          * @param validationDescriptor Normalized information about the item (`size`, `name`).
          * @returns qq.Promise with appropriate callbacks invoked depending on the validity of the file
          * @private
          */
-        _validateFileOrBlobData: function(item, validationDescriptor) {
+        _validateFileOrBlobData: function(fileWrapper, validationDescriptor) {
             var self = this,
+                file = fileWrapper.file,
                 name = validationDescriptor.name,
                 size = validationDescriptor.size,
-                buttonId = this._getButtonId(item),
+                buttonId = this._getButtonId(file),
                 validationBase = this._getValidationBase(buttonId),
                 validityChecker = new qq.Promise();
 
             validityChecker.then(
                 function() {},
                 function() {
-                    self._fileOrBlobRejected(null, name);
+                    self._fileOrBlobRejected(fileWrapper.id, name);
                 });
 
-            if (qq.isFileOrInput(item) && !this._isAllowedExtension(validationBase.allowedExtensions, name)) {
-                this._itemError("typeError", name, item);
+            if (qq.isFileOrInput(file) && !this._isAllowedExtension(validationBase.allowedExtensions, name)) {
+                this._itemError("typeError", name, file);
                 return validityChecker.failure();
             }
 
             if (size === 0) {
-                this._itemError("emptyError", name, item);
+                this._itemError("emptyError", name, file);
                 return validityChecker.failure();
             }
 
             if (size && validationBase.sizeLimit && size > validationBase.sizeLimit) {
-                this._itemError("sizeError", name, item);
+                this._itemError("sizeError", name, file);
                 return validityChecker.failure();
             }
 
             if (size && size < validationBase.minSizeLimit) {
-                this._itemError("minSizeError", name, item);
+                this._itemError("minSizeError", name, file);
                 return validityChecker.failure();
             }
 
-            if (qq.ImageValidation && qq.supportedFeatures.imagePreviews && qq.isFile(item)) {
-                new qq.ImageValidation(item, qq.bind(self.log, self)).validate(validationBase.image).then(
+            if (qq.ImageValidation && qq.supportedFeatures.imagePreviews && qq.isFile(file)) {
+                new qq.ImageValidation(file, qq.bind(self.log, self)).validate(validationBase.image).then(
                     validityChecker.success,
                     function(errorCode) {
-                        self._itemError(errorCode + "ImageError", name, item);
+                        self._itemError(errorCode + "ImageError", name, file);
                         validityChecker.failure();
                     }
                 );
@@ -2555,10 +2660,8 @@ qq.status = {
         },
 
         _fileOrBlobRejected: function(id) {
-            /* jshint eqeqeq: false,eqnull: true */
-            if (id != null) {
-                this._uploadData.setStatus(id, qq.status.REJECTED);
-            }
+            this._netUploadedOrQueued--;
+            this._uploadData.setStatus(id, qq.status.REJECTED);
         },
 
         /**
@@ -2655,11 +2758,14 @@ qq.status = {
             self = this;
 
             safeCallback = function(name, callback, args) {
+                var errorMsg;
+
                 try {
                     return callback.apply(self, args);
                 }
                 catch (exception) {
-                    self.log("Caught exception in '" + name + "' callback - " + exception.message, "error");
+                    errorMsg = exception.message || exception.toString();
+                    self.log("Caught exception in '" + name + "' callback - " + errorMsg, "error");
                 }
             };
 
@@ -2725,12 +2831,12 @@ qq.status = {
             return fileDescriptor;
         },
 
-        _getValidationDescriptors: function(files) {
+        _getValidationDescriptors: function(fileWrappers) {
             var self = this,
                 fileDescriptors = [];
 
-            qq.each(files, function(idx, file) {
-                fileDescriptors.push(self._getValidationDescriptor(file));
+            qq.each(fileWrappers, function(idx, fileWrapper) {
+                fileDescriptors.push(self._getValidationDescriptor(fileWrapper.file));
             });
 
             return fileDescriptors;
@@ -2859,6 +2965,7 @@ qq.status = {
             maxConnections: 3,
             disableCancelForFormUploads: false,
             autoUpload: true,
+
             request: {
                 endpoint: "/server/upload",
                 params: {},
@@ -2870,6 +2977,7 @@ qq.status = {
                 totalFileSizeName: "qqtotalfilesize",
                 filenameParam: "qqfilename"
             },
+
             validation: {
                 allowedExtensions: [],
                 sizeLimit: 0,
@@ -2884,6 +2992,7 @@ qq.status = {
                     minWidth: 0
                 }
             },
+
             callbacks: {
                 onSubmit: function(id, name){},
                 onSubmitted: function(id, name){},
@@ -2903,8 +3012,10 @@ qq.status = {
                 onDelete: function(id){},
                 onDeleteComplete: function(id, xhrOrXdr, isError){},
                 onPasteReceived: function(blob) {},
-                onStatusChange: function(id, oldStatus, newStatus) {}
+                onStatusChange: function(id, oldStatus, newStatus) {},
+                onSessionRequestComplete: function(response, success, xhrOrXdr) {}
             },
+
             messages: {
                 typeError: "{file} has an invalid extension. Valid extension(s): {extensions}.",
                 sizeError: "{file} is too large, maximum file size is {sizeLimit}.",
@@ -2917,18 +3028,21 @@ qq.status = {
                 minHeightImageError: "Image is not tall enough.",
                 minWidthImageError: "Image is not wide enough.",
                 retryFailTooManyItems: "Retry failed - you have reached your file limit.",
-                onLeave: "The files are being uploaded, if you leave now the upload will be cancelled."
+                onLeave: "The files are being uploaded, if you leave now the upload will be canceled."
             },
+
             retry: {
                 enableAuto: false,
                 maxAutoAttempts: 3,
                 autoAttemptDelay: 5,
                 preventRetryResponseProperty: "preventRetry"
             },
+
             classes: {
                 buttonHover: "qq-upload-button-hover",
                 buttonFocus: "qq-upload-button-focus"
             },
+
             chunking: {
                 enabled: false,
                 partSize: 2000000,
@@ -2940,6 +3054,7 @@ qq.status = {
                     totalParts: "qqtotalparts"
                 }
             },
+
             resume: {
                 enabled: false,
                 id: null,
@@ -2948,16 +3063,19 @@ qq.status = {
                     resuming: "qqresume"
                 }
             },
+
             formatFileName: function(fileOrBlobName) {
                 if (fileOrBlobName !== undefined && fileOrBlobName.length > 33) {
                     fileOrBlobName = fileOrBlobName.slice(0, 19) + "..." + fileOrBlobName.slice(-14);
                 }
                 return fileOrBlobName;
             },
+
             text: {
                 defaultResponseError: "Upload failure reason unknown",
                 sizeSymbols: ["kB", "MB", "GB", "TB", "PB", "EB"]
             },
+
             deleteFile : {
                 enabled: false,
                 method: "DELETE",
@@ -2965,18 +3083,22 @@ qq.status = {
                 customHeaders: {},
                 params: {}
             },
+
             cors: {
                 expected: false,
                 sendCredentials: false,
                 allowXdr: false
             },
+
             blobs: {
                 defaultName: "misc_data"
             },
+
             paste: {
                 targetElement: null,
                 defaultName: "pasted_image"
             },
+
             camera: {
                 ios: false,
 
@@ -2990,7 +3112,16 @@ qq.status = {
             // contain an invisible `<input type="file">` created by Fine Uploader.
             // Optional properties of each object include `multiple`, `validation`,
             // and `folders`.
-            extraButtons: []
+            extraButtons: [],
+
+            // Depends on the session module.  Used to query the server for an initial file list
+            // during initialization and optionally after a `reset`.
+            session: {
+                endpoint: null,
+                params: {},
+                customHeaders: {},
+                refreshOnReset: true
+            }
         };
 
         // Replace any default options with user defined ones
@@ -3043,6 +3174,7 @@ qq.status = {
         this._preventLeaveInProgress();
 
         this._imageGenerator = qq.ImageGenerator && new qq.ImageGenerator(qq.bind(this.log, this));
+        this._refreshSessionData();
     };
 
     // Define the private & public API methods.
@@ -3070,7 +3202,8 @@ qq.AjaxRequester = function (o) {
             allowXRequestedWithAndCacheControl: true,
             successfulResponseCodes: {
                 "DELETE": [200, 202, 204],
-                "POST": [200, 204]
+                "POST": [200, 204],
+                "GET": [200]
             },
             cors: {
                 expected: false,
@@ -3078,8 +3211,7 @@ qq.AjaxRequester = function (o) {
             },
             log: function (str, level) {},
             onSend: function (id) {},
-            onComplete: function (id, xhrOrXdr, isError) {},
-            onCancel: function (id) {}
+            onComplete: function (id, xhrOrXdr, isError) {}
         };
 
     qq.extend(options, o);
@@ -3427,8 +3559,8 @@ qq.UploadHandler = function(o, namespace) {
             sendCredentials: false
         },
         maxConnections: 3, // maximum number of concurrent uploads
-        uuidParam: "qquuid",
-        totalFileSizeParam: "qqtotalfilesize",
+        uuidName: "qquuid",
+        totalFileSizeName: "qqtotalfilesize",
         chunking: {
             enabled: false,
             partSize: 2000000, //bytes
@@ -3457,7 +3589,8 @@ qq.UploadHandler = function(o, namespace) {
         onUploadChunkSuccess: function(id, chunkData, response, xhr){},
         onAutoRetry: function(id, fileName, response, xhr){},
         onResume: function(id, fileName, chunkData){},
-        onUuidChanged: function(id, newUuid){}
+        onUuidChanged: function(id, newUuid){},
+        getName: function(id) {}
 
     };
     qq.extend(options, o);
@@ -3492,7 +3625,11 @@ qq.UploadHandler = function(o, namespace) {
         var handlerType = namespace ? qq[namespace] : qq,
             handlerModuleSubtype = qq.supportedFeatures.ajaxUploading ? "Xhr" : "Form";
 
-        handlerImpl = new handlerType["UploadHandler" + handlerModuleSubtype](options, dequeue, options.onUuidChanged, log);
+        handlerImpl = new handlerType["UploadHandler" + handlerModuleSubtype](
+            options,
+            {onUploadComplete: dequeue, onUuidChanged: options.onUuidChanged,
+                getName: options.getName, getUuid: options.getUuid, getSize: options.getSize, log: log}
+        );
     }
 
 
@@ -3501,8 +3638,8 @@ qq.UploadHandler = function(o, namespace) {
          * Adds file or file input to the queue
          * @returns id
          **/
-        add: function(file) {
-            return handlerImpl.add(file);
+        add: function(id, file) {
+            return handlerImpl.add.apply(this, arguments);
         },
 
         /**
@@ -3561,28 +3698,6 @@ qq.UploadHandler = function(o, namespace) {
             queue = [];
         },
 
-        /**
-         * Returns name of the file identified by id
-         */
-        getName: function(id) {
-            return handlerImpl.getName(id);
-        },
-
-        // Update/change the name of the associated file.
-        // This updated name should be sent as a parameter.
-        setName: function(id, newName) {
-            handlerImpl.setName(id, newName);
-        },
-
-        /**
-         * Returns size of the file identified by id
-         */
-        getSize: function(id){
-            if (handlerImpl.getSize) {
-                return handlerImpl.getSize(id);
-            }
-        },
-
         getFile: function(id) {
             if (handlerImpl.getFile) {
                 return handlerImpl.getFile(id);
@@ -3603,15 +3718,9 @@ qq.UploadHandler = function(o, namespace) {
         },
 
         expunge: function(id) {
-            return handlerImpl.expunge(id);
-        },
-
-        getUuid: function(id) {
-            return handlerImpl.getUuid(id);
-        },
-
-        setUuid: function(id, newUuid) {
-            return handlerImpl.setUuid(id, newUuid);
+            if (this.isValid(id)) {
+                return handlerImpl.expunge(id);
+            }
         },
 
         /**
@@ -3664,23 +3773,27 @@ qq.UploadHandler = function(o, namespace) {
  * in some cases by specific form upload handlers.
  *
  * @param internalApi Object that will be filled with internal API methods
- * @param fileState An array containing objects that describe files tracked by the XHR upload handler.
- * @param isCors true if we should expect the response to come from a different origin.
- * @param inputName Name of the file input field/parameter.
- * @param onCancel Invoked when a request is handled to cancel an in-progress upload.  Invoked before the upload is actually cancelled.
- * @param onUuidChanged Callback to be invoked when the internal UUID is altered.
- * @param log Method used to send messages to the log.
+ * @param spec Options/static values used to configure this handler
+ * @param proxy Callbacks & methods used to query for or push out data/changes
  * @constructor
  */
-qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, onCancel, onUuidChanged, log) {
+qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
     "use strict";
 
     var formHandlerInstanceId = qq.getUniqueId(),
-        corsMessageReceiver = new qq.WindowReceiveMessage({log: log}),
         onloadCallbacks = {},
         detachLoadEvents = {},
         postMessageCallbackTimers = {},
-        publicApi = this;
+        publicApi = this,
+        isCors = spec.isCors,
+        fileState = spec.fileState,
+        inputName = spec.inputName,
+        onCancel = proxy.onCancel,
+        onUuidChanged = proxy.onUuidChanged,
+        getName = proxy.getName,
+        getUuid = proxy.getUuid,
+        log = proxy.log,
+        corsMessageReceiver = new qq.WindowReceiveMessage({log: log});
 
 
     /**
@@ -3721,7 +3834,7 @@ qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, on
     function registerPostMessageCallback(iframe, callback) {
         var iframeName = iframe.id,
             fileId = getFileIdForIframeName(iframeName),
-            uuid = fileState[fileId].uuid;
+            uuid = getUuid(fileId);
 
         onloadCallbacks[uuid] = callback;
 
@@ -3831,7 +3944,7 @@ qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, on
                 response = qq.parseJson(innerHtmlOrMessage);
 
                 if (response.newUuid !== undefined) {
-                    publicApi.setUuid(id, response.newUuid);
+                    onUuidChanged(id, response.newUuid);
                 }
             }
             catch(error) {
@@ -3941,42 +4054,19 @@ qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, on
 // PUBLIC API
 
     qq.extend(this, {
-        add: function(fileInput) {
-            var id = fileState.push({input: fileInput}) - 1;
+        add: function(id, fileInput) {
+            fileState[id] = {input: fileInput};
 
             fileInput.setAttribute("name", inputName);
-
-            fileState[id].uuid = qq.getUniqueId();
 
             // remove file input from DOM
             if (fileInput.parentNode){
                 qq(fileInput).remove();
             }
-
-            return id;
-        },
-
-        getName: function(id) {
-            /*jslint regexp: true*/
-
-            if (fileState[id].newName !== undefined) {
-                return fileState[id].newName;
-            }
-            else if (this.isValid(id)) {
-                // get input value and remove path to normalize
-                return fileState[id].input.value.replace(/.*(\/|\\)/, "");
-            }
-            else {
-                log(id + " is not a valid item ID.", "error");
-            }
         },
 
         getInput: function(id) {
             return fileState[id].input;
-        },
-
-        setName: function(id, newName) {
-            fileState[id].newName = newName;
         },
 
         isValid: function(id) {
@@ -3992,12 +4082,8 @@ qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, on
             return expungeFile(id);
         },
 
-        getUuid: function(id) {
-            return fileState[id].uuid;
-        },
-
         cancel: function(id) {
-            var onCancelRetVal = onCancel(id, this.getName(id));
+            var onCancelRetVal = onCancel(id, getName(id));
 
             if (onCancelRetVal instanceof qq.Promise) {
                 return onCancelRetVal.then(function() {
@@ -4014,12 +4100,6 @@ qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, on
 
         upload: function(id) {
             // implementation-specific
-        },
-
-        setUuid: function(id, newUuid) {
-            log("Server requested UUID change from '" + fileState[id].uuid + "' to '" + newUuid + "'");
-            fileState[id].uuid = newUuid;
-            onUuidChanged(id, newUuid);
         }
     });
 };
@@ -4030,18 +4110,22 @@ qq.UploadHandlerFormApi = function(internalApi, fileState, isCors, inputName, on
  * XHR upload handlers.
  *
  * @param internalApi Object that will be filled with internal API methods
- * @param fileState An array containing objects that describe files tracked by the XHR upload handler.
- * @param chunking Properties that describe chunking option values.  Null if chunking is not enabled or possible.
- * @param onUpload Used to call the specific XHR upload handler when an upload has been request.
- * @param onCancel Invoked when a request is handled to cancel an in-progress upload.  Invoked before the upload is actually cancelled.
- * @param onUuidChanged Callback to be invoked when the internal UUID is altered.
- * @param log Method used to send messages to the log.
+ * @param spec Options/static values used to configure this handler
+ * @param proxy Callbacks & methods used to query for or push out data/changes
  * @constructor
  */
-qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, onCancel, onUuidChanged, log) {
+qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
     "use strict";
 
-    var publicApi = this;
+    var publicApi = this,
+        fileState = spec.fileState,
+        chunking = spec.chunking,
+        onUpload = proxy.onUpload,
+        onCancel = proxy.onCancel,
+        onUuidChanged = proxy.onUuidChanged,
+        getName = proxy.getName,
+        getSize = proxy.getSize,
+        log = proxy.log;
 
 
     function getChunk(fileOrBlob, startByte, endByte) {
@@ -4077,7 +4161,7 @@ qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, on
          */
         getTotalChunks: function(id) {
             if (chunking) {
-                var fileSize = publicApi.getSize(id),
+                var fileSize = getSize(id),
                     chunkSize = chunking.partSize;
 
                 return Math.ceil(fileSize / chunkSize);
@@ -4086,7 +4170,7 @@ qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, on
 
         getChunkData: function(id, chunkIndex) {
             var chunkSize = chunking.partSize,
-                fileSize = publicApi.getSize(id),
+                fileSize = getSize(id),
                 fileOrBlob = publicApi.getFile(id),
                 startBytes = chunkSize * chunkIndex,
                 endBytes = startBytes+chunkSize >= fileSize ? fileSize : startBytes+chunkSize,
@@ -4115,63 +4199,16 @@ qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, on
     qq.extend(this, {
         /**
          * Adds File or Blob to the queue
-         * Returns id to use with upload, cancel
          **/
-        add: function(fileOrBlobData){
-            var id,
-                uuid = qq.getUniqueId();
-
+        add: function(id, fileOrBlobData) {
             if (qq.isFile(fileOrBlobData)) {
-                id = fileState.push({file: fileOrBlobData}) - 1;
+                fileState[id] = {file: fileOrBlobData};
             }
             else if (qq.isBlob(fileOrBlobData.blob)) {
-                id = fileState.push({blobData: fileOrBlobData}) - 1;
+                fileState[id] =  {blobData: fileOrBlobData};
             }
             else {
-                throw new Error("Passed obj in not a File or BlobData (in qq.UploadHandlerXhr)");
-            }
-
-            fileState[id].uuid = uuid;
-
-            return id;
-        },
-
-        getName: function(id) {
-            if (this.isValid(id)) {
-                var file = fileState[id].file,
-                    blobData = fileState[id].blobData,
-                    newName = fileState[id].newName;
-
-                if (newName !== undefined) {
-                    return newName;
-                }
-                else if (file) {
-                    // fix missing name in Safari 4
-                    //NOTE: fixed missing name firefox 11.0a2 file.fileName is actually undefined
-                    return (file.fileName !== null && file.fileName !== undefined) ? file.fileName : file.name;
-                }
-                else {
-                    return blobData.name;
-                }
-            }
-            else {
-                log(id + " is not a valid item ID.", "error");
-            }
-        },
-
-        setName: function(id, newName) {
-            fileState[id].newName = newName;
-        },
-
-        getSize: function(id) {
-            /*jshint eqnull: true*/
-            var fileOrBlob = fileState[id].file || fileState[id].blobData.blob;
-
-            if (qq.isFileOrInput(fileOrBlob)) {
-                return fileOrBlob.fileSize != null ? fileOrBlob.fileSize : fileOrBlob.size;
-            }
-            else {
-                return fileOrBlob.size;
+                throw new Error("Passed obj is not a File or BlobData (in qq.UploadHandlerXhr)");
             }
         },
 
@@ -4200,10 +4237,6 @@ qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, on
             delete fileState[id];
         },
 
-        getUuid: function(id) {
-            return fileState[id].uuid;
-        },
-
         /**
          * Sends the file identified by id to the server
          */
@@ -4213,7 +4246,7 @@ qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, on
         },
 
         cancel: function(id) {
-            var onCancelRetVal = onCancel(id, this.getName(id));
+            var onCancelRetVal = onCancel(id, getName(id));
 
             if (onCancelRetVal instanceof qq.Promise) {
                 return onCancelRetVal.then(function() {
@@ -4228,17 +4261,11 @@ qq.UploadHandlerXhrApi = function(internalApi, fileState, chunking, onUpload, on
             return false;
         },
 
-        setUuid: function(id, newUuid) {
-            log("Server requested UUID change from '" + fileState[id].uuid + "' to '" + newUuid + "'");
-            fileState[id].uuid = newUuid;
-            onUuidChanged(id, newUuid);
-        },
-
         pause: function(id) {
             var xhr = fileState[id].xhr;
 
             if(xhr) {
-                log(qq.format("Aborting XHR upload for {} '{}' due to pause instruction.", id, this.getName(id)));
+                log(qq.format("Aborting XHR upload for {} '{}' due to pause instruction.", id, getName(id)));
                 fileState[id].paused = true;
                 xhr.abort();
                 return true;
@@ -4342,6 +4369,16 @@ qq.WindowReceiveMessage = function(o) {
 
             continued && this._templating.uploadContinued(id);
             return continued;
+        },
+
+        getId: function(fileContainerOrChildEl) {
+            return this._templating.getFileId(fileContainerOrChildEl);
+        },
+
+        getDropTarget: function(fileId) {
+            var file = this.getFile(fileId);
+
+            return file.qqDropTarget;
         }
     };
 
@@ -4401,11 +4438,15 @@ qq.WindowReceiveMessage = function(o) {
                     processingDroppedFiles: function() {
                         templating.showDropProcessing();
                     },
-                    processingDroppedFilesComplete: function(files) {
+                    processingDroppedFilesComplete: function(files, targetEl) {
                         templating.hideDropProcessing();
 
+                        qq.each(files, function(idx, file) {
+                            file.qqDropTarget = targetEl;
+                        });
+
                         if (files) {
-                            self.addFiles(files);
+                            self.addFiles(files, null, null);
                         }
                     },
                     dropError: function(code, errorData) {
@@ -4598,13 +4639,7 @@ qq.WindowReceiveMessage = function(o) {
                 templating.hideSpinner(id);
 
                 if (result.success) {
-                    if (self._isDeletePossible()) {
-                        templating.showDeleteButton(id);
-                    }
-
-                    qq(templating.getFileContainer(id)).addClass(self._classes.success);
-
-                    self._maybeUpdateThumbnail(id);
+                    self._markFileAsSuccessful(id);
                 }
                 else {
                     qq(templating.getFileContainer(id)).addClass(self._classes.fail);
@@ -4628,6 +4663,18 @@ qq.WindowReceiveMessage = function(o) {
             }
 
             return parentRetVal;
+        },
+
+        _markFileAsSuccessful: function(id) {
+            var templating = this._templating;
+
+            if (this._isDeletePossible()) {
+                templating.showDeleteButton(id);
+            }
+
+            qq(templating.getFileContainer(id)).addClass(this._classes.success);
+
+            this._maybeUpdateThumbnail(id);
         },
 
         _onUpload: function(id, name){
@@ -4723,7 +4770,7 @@ qq.WindowReceiveMessage = function(o) {
 
         _showDeleteConfirm: function(id, uuid, mandatedParams) {
             /*jshint -W004 */
-            var fileName = this._handler.getName(id),
+            var fileName = this.getName(id),
                 confirmMessage = this._options.deleteFile.confirmMessage.replace(/\{filename\}/g, fileName),
                 uuid = this.getUuid(id),
                 deleteRequestArgs = arguments,
@@ -4742,13 +4789,9 @@ qq.WindowReceiveMessage = function(o) {
             }
         },
 
-        _addToList: function(id, name) {
+        _addToList: function(id, name, canned) {
             var prependData,
                 prependIndex = 0;
-
-            if (this._options.disableCancelForFormUploads && !qq.supportedFeatures.ajaxUploading) {
-                this._templating.disableCancel();
-            }
 
             if (this._options.display.prependFiles) {
                 if (this._totalFilesInBatch > 1 && this._filesInBatchAddedToUi > 0) {
@@ -4760,13 +4803,25 @@ qq.WindowReceiveMessage = function(o) {
                 };
             }
 
-            if (!this._options.multiple) {
-                this._handler.cancelAll();
-                this._clearList();
+            if (!canned) {
+                if (this._options.disableCancelForFormUploads && !qq.supportedFeatures.ajaxUploading) {
+                    this._templating.disableCancel();
+                }
+
+                if (!this._options.multiple) {
+                    this._handler.cancelAll();
+                    this._clearList();
+                }
             }
 
             this._templating.addFile(id, this._options.formatFileName(name), prependData);
-            this._templating.generatePreview(id, this.getFile(id));
+
+            if (canned) {
+                this._thumbnailUrls[id] && this._templating.updateThumbnail(id, this._thumbnailUrls[id], true);
+            }
+            else {
+                this._templating.generatePreview(id, this.getFile(id));
+            }
 
             this._filesInBatchAddedToUi += 1;
 
@@ -4784,11 +4839,13 @@ qq.WindowReceiveMessage = function(o) {
             var size = this.getSize(id),
                 sizeForDisplay = this._formatSize(size);
 
-            if (loadedSize !== undefined && totalSize !== undefined) {
-                sizeForDisplay = this._formatProgress(loadedSize, totalSize);
-            }
+            if (size >= 0) {
+                if (loadedSize !== undefined && totalSize !== undefined) {
+                    sizeForDisplay = this._formatProgress(loadedSize, totalSize);
+                }
 
-            this._templating.updateSize(id, sizeForDisplay);
+                this._templating.updateSize(id, sizeForDisplay);
+            }
         },
 
         _formatProgress: function (uploadedSize, totalSize) {
@@ -4879,6 +4936,17 @@ qq.WindowReceiveMessage = function(o) {
             var thumbnailUrl = this._thumbnailUrls[fileId];
 
             this._templating.updateThumbnail(fileId, thumbnailUrl);
+        },
+
+        _addCannedFile: function(sessionData) {
+            var id = this._parent.prototype._addCannedFile.apply(this, arguments);
+
+            this._addToList(id, this.getName(id), true);
+            this._templating.hideSpinner(id);
+            this._templating.hideCancel(id);
+            this._markFileAsSuccessful(id);
+
+            return id;
         }
     };
 }());
@@ -5112,6 +5180,8 @@ qq.Templating = function(spec) {
             thumbnail: "qq-thumbnail-selector"
         },
         previewGeneration = {},
+        cachedThumbnailNotAvailableImg = new qq.Promise(),
+        cachedWaitingForThumbnailImg = new qq.Promise(),
         log,
         isEditElementsExist,
         isRetryElementExist,
@@ -5119,9 +5189,7 @@ qq.Templating = function(spec) {
         container,
         fileList,
         showThumbnails,
-        serverScale,
-        cachedThumbnailNotAvailableImg,
-        cachedWaitingForThumbnailImg;
+        serverScale;
 
     /**
      * Grabs the HTML from the script tag holding the template markup.  This function will also adjust
@@ -5351,23 +5419,31 @@ qq.Templating = function(spec) {
             if (notAvailableUrl) {
                 options.imageGenerator.generate(notAvailableUrl, new Image(), spec).then(
                     function(updatedImg) {
-                        cachedThumbnailNotAvailableImg = updatedImg;
+                        cachedThumbnailNotAvailableImg.success(updatedImg);
                     },
                     function() {
+                        cachedThumbnailNotAvailableImg.failure();
                         log("Problem loading 'not available' placeholder image at " + notAvailableUrl, "error");
                     }
                 );
+            }
+            else {
+                cachedThumbnailNotAvailableImg.failure();
             }
 
             if (waitingUrl) {
                 options.imageGenerator.generate(waitingUrl, new Image(), spec).then(
                     function(updatedImg) {
-                        cachedWaitingForThumbnailImg = updatedImg;
+                        cachedWaitingForThumbnailImg.success(updatedImg);
                     },
                     function() {
+                        cachedWaitingForThumbnailImg.failure();
                         log("Problem loading 'waiting for thumbnail' placeholder image at " + waitingUrl, "error");
                     }
                 );
+            }
+            else {
+                cachedWaitingForThumbnailImg.failure();
             }
         }
     }
@@ -5375,17 +5451,19 @@ qq.Templating = function(spec) {
     // Displays a "waiting for thumbnail" type placeholder image
     // iff we were able to load it during initialization of the templating module.
     function displayWaitingImg(thumbnail) {
-        if (cachedWaitingForThumbnailImg) {
-            maybeScalePlaceholderViaCss(cachedWaitingForThumbnailImg, thumbnail);
-            thumbnail.src = cachedWaitingForThumbnailImg.src;
-            show(thumbnail);
-        }
-        // In some browsers (such as IE9 and older) an img w/out a src attribute
-        // are displayed as "broken" images, so we sohuld just hide the img tag
-        // if we aren't going to display the "waiting" placeholder.
-        else {
+        cachedWaitingForThumbnailImg.then(function(img) {
+            maybeScalePlaceholderViaCss(img, thumbnail);
+            /* jshint eqnull:true */
+            if (thumbnail.getAttribute("src") == null) {
+                thumbnail.src = img.src;
+                show(thumbnail);
+            }
+        }, function() {
+            // In some browsers (such as IE9 and older) an img w/out a src attribute
+            // are displayed as "broken" images, so we sohuld just hide the img tag
+            // if we aren't going to display the "waiting" placeholder.
             hide(thumbnail);
-        }
+        });
     }
 
     // Displays a "thumbnail not available" type placeholder image
@@ -5394,19 +5472,19 @@ qq.Templating = function(spec) {
     function maybeSetDisplayNotAvailableImg(id, thumbnail) {
         var previewing = previewGeneration[id] || new qq.Promise().failure();
 
-        if (cachedThumbnailNotAvailableImg) {
+        cachedThumbnailNotAvailableImg.then(function(img) {
             previewing.then(
                 function() {
                     delete previewGeneration[id];
                 },
                 function() {
-                    maybeScalePlaceholderViaCss(cachedThumbnailNotAvailableImg, thumbnail);
-                    thumbnail.src = cachedThumbnailNotAvailableImg.src;
+                    maybeScalePlaceholderViaCss(img, thumbnail);
+                    thumbnail.src = img.src;
                     show(thumbnail);
                     delete previewGeneration[id];
                 }
             );
-        }
+        });
     }
 
     // Ensures a placeholder image does not exceed any max size specified
@@ -5497,12 +5575,14 @@ qq.Templating = function(spec) {
         getFileId: function(el) {
             var currentNode = el;
 
-            /*jshint -W116*/
-            while (currentNode.getAttribute(FILE_ID_ATTR) == null) {
-                currentNode = currentNode.parentNode;
-            }
+            if (currentNode) {
+                /*jshint -W116*/
+                while (currentNode.getAttribute(FILE_ID_ATTR) == null) {
+                    currentNode = currentNode.parentNode;
+                }
 
-            return parseInt(currentNode.getAttribute(FILE_ID_ATTR));
+                return parseInt(currentNode.getAttribute(FILE_ID_ATTR));
+            }
         },
 
         getFileList: function() {
@@ -5744,7 +5824,7 @@ qq.Templating = function(spec) {
             }
         },
 
-        updateThumbnail: function(id, thumbnailUrl) {
+        updateThumbnail: function(id, thumbnailUrl, showWaitingImg) {
             var thumbnail = getThumbnail(id),
                 spec = {
                     maxSize: thumbnailMaxSize,
@@ -5753,6 +5833,10 @@ qq.Templating = function(spec) {
 
             if (thumbnail) {
                 if (thumbnailUrl) {
+                    if (showWaitingImg) {
+                        displayWaitingImg(thumbnail);
+                    }
+
                     return options.imageGenerator.generate(thumbnailUrl, thumbnail, spec).then(
                         function() {
                             show(thumbnail);
@@ -5778,6 +5862,9 @@ qq.s3.util = qq.s3.util || (function() {
 
     return {
         AWS_PARAM_PREFIX: "x-amz-meta-",
+        SESSION_TOKEN_PARAM_NAME: "x-amz-security-token",
+        REDUCED_REDUNDANCY_PARAM_NAME: "x-amz-storage-class",
+        REDUCED_REDUNDANCY_PARAM_VALUE: "REDUCED_REDUNDANCY",
 
         /**
          * This allows for the region to be specified in the bucket's endpoint URL, or not.
@@ -5820,7 +5907,7 @@ qq.s3.util = qq.s3.util || (function() {
         /**
          * Create a policy document to be signed and sent along with the S3 upload request.
          *
-         * @param spec Object with properties: `endpoint`, `key`, `acl`, `type`, `expectedStatus`, `params`, `minFileSize`, and `maxFileSize`.
+         * @param spec Object with properties use to construct the policy document.
          * @returns {Object} Policy doc.
          */
         getPolicy: function(spec) {
@@ -5832,6 +5919,7 @@ qq.s3.util = qq.s3.util || (function() {
                 type = spec.type,
                 expirationDate = new Date(),
                 expectedStatus = spec.expectedStatus,
+                sessionToken = spec.sessionToken,
                 params = spec.params,
                 successRedirectUrl = qq.s3.util.getSuccessRedirectAbsoluteUrl(spec.successRedirectUrl),
                 minFileSize = spec.minFileSize,
@@ -5856,7 +5944,13 @@ qq.s3.util = qq.s3.util || (function() {
             }
 
             if (reducedRedundancy) {
-                conditions.push({"x-amz-storage-class": "REDUCED_REDUNDANCY"});
+                conditions.push({});
+                conditions[conditions.length - 1][qq.s3.util.REDUCED_REDUNDANCY_PARAM_NAME] = qq.s3.util.REDUCED_REDUNDANCY_PARAM_VALUE;
+            }
+
+            if (sessionToken) {
+                conditions.push({});
+                conditions[conditions.length - 1][qq.s3.util.SESSION_TOKEN_PARAM_NAME] = sessionToken;
             }
 
             conditions.push({key: key});
@@ -5878,6 +5972,31 @@ qq.s3.util = qq.s3.util || (function() {
         },
 
         /**
+         * Update a previously constructed policy document with updated credentials.  Currently, this only requires we
+         * update the session token.  This is only relevant if requests are being signed client-side.
+         *
+         * @param policy Live policy document
+         * @param newSessionToken Updated session token.
+         */
+        refreshPolicyCredentials: function(policy, newSessionToken) {
+            var sessionTokenFound = false;
+
+            qq.each(policy.conditions, function(oldCondIdx, oldCondObj) {
+                qq.each(oldCondObj, function(oldCondName, oldCondVal) {
+                    if (oldCondName === qq.s3.util.SESSION_TOKEN_PARAM_NAME) {
+                        oldCondObj[oldCondName] = newSessionToken;
+                        sessionTokenFound = true;
+                    }
+                });
+            });
+
+            if (!sessionTokenFound) {
+                policy.conditions.push({});
+                policy.conditions[policy.conditions.length - 1][qq.s3.util.SESSION_TOKEN_PARAM_NAME] = newSessionToken;
+            }
+        },
+
+        /**
          * Generates all parameters to be passed along with the S3 upload request.  This includes invoking a callback
          * that is expected to asynchronously retrieve a signature for the policy document.  Note that the server
          * signing the request should reject a "tainted" policy document that includes unexpected values, since it is
@@ -5893,6 +6012,7 @@ qq.s3.util = qq.s3.util || (function() {
                 customParams = spec.params,
                 promise = new qq.Promise(),
                 policyJson = qq.s3.util.getPolicy(spec),
+                sessionToken = spec.sessionToken,
                 type = spec.type,
                 key = spec.key,
                 accessKey = spec.accessKey,
@@ -5918,7 +6038,11 @@ qq.s3.util = qq.s3.util || (function() {
             }
 
             if (reducedRedundancy) {
-                awsParams["x-amz-storage-class"] = "REDUCED_REDUNDANCY";
+                awsParams[qq.s3.util.REDUCED_REDUNDANCY_PARAM_NAME] = qq.s3.util.REDUCED_REDUNDANCY_PARAM_VALUE;
+            }
+
+            if (sessionToken) {
+                awsParams[qq.s3.util.SESSION_TOKEN_PARAM_NAME] = sessionToken;
             }
 
             awsParams.acl = acl;
@@ -5933,9 +6057,17 @@ qq.s3.util = qq.s3.util || (function() {
             // Invoke a promissory callback that should provide us with a base64-encoded policy doc and an
             // HMAC signature for the policy doc.
             signPolicyCallback(policyJson).then(
-                function(policyAndSignature) {
+                function(policyAndSignature, updatedAccessKey, updatedSessionToken) {
                     awsParams.policy = policyAndSignature.policy;
                     awsParams.signature = policyAndSignature.signature;
+
+                    if (updatedAccessKey) {
+                        awsParams.AWSAccessKeyId = updatedAccessKey;
+                    }
+                    if (updatedSessionToken) {
+                        awsParams[qq.s3.util.SESSION_TOKEN_PARAM_NAME] = updatedSessionToken;
+                    }
+
                     promise.success(awsParams);
                 },
                 function(errorMessage) {
@@ -6080,6 +6212,7 @@ qq.s3.util = qq.s3.util || (function() {
     qq.s3.FineUploaderBasic = function(o) {
         var options = {
             request: {
+                // public key (required for server-side signing, ignored if `credentials` have been provided)
                 accessKey: null,
                 // Making this configurable in the traditional uploader was probably a bad idea.
                 // Let's just set this to "uuid" in the S3 uploader and not document the fact that this can be changed.
@@ -6095,6 +6228,19 @@ qq.s3.util = qq.s3.util || (function() {
                 reducedRedundancy: false
             },
 
+            credentials: {
+                // Public key (required).
+                accessKey: null,
+                // Private key (required).
+                secretKey: null,
+                // Expiration date for the credentials (required).  May be an ISO string or a `Date`.
+                expiration: null,
+                // Temporary credentials session token.
+                // Only required for temporary credentials obtained via AssumeRoleWithWebIdentity.
+                sessionToken: null
+            },
+
+            // optional/ignored if `credentials` is provided
             signature: {
                 endpoint: null,
                 customHeaders: {}
@@ -6125,11 +6271,19 @@ qq.s3.util = qq.s3.util || (function() {
 
             cors: {
                 allowXdr: true
+            },
+
+            callbacks: {
+                onCredentialsExpired: function() {}
             }
         };
 
         // Replace any default options with user defined ones
         qq.extend(options, o, true);
+
+        if (!this.setCredentials(options.credentials, true)) {
+            this._currentCredentials.accessKey = options.request.accessKey;
+        }
 
         // Call base module
         qq.FineUploaderBasic.call(this, options);
@@ -6139,6 +6293,9 @@ qq.s3.util = qq.s3.util || (function() {
         // This will hold callbacks for failed uploadSuccess requests that will be invoked on retry.
         // Indexed by file ID.
         this._failedSuccessRequestCallbacks = {};
+
+        // Holds S3 keys for file representations constructed from a session request.
+        this._cannedKeys = {};
     };
 
     // Inherit basic public & private API methods.
@@ -6152,7 +6309,12 @@ qq.s3.util = qq.s3.util || (function() {
          * @returns {*} Key name associated w/ the file, if one exists
          */
         getKey: function(id) {
-            return this._handler.getThirdPartyFileId(id);
+            /* jshint eqnull:true */
+            if (this._cannedKeys[id] == null) {
+                return this._handler.getThirdPartyFileId(id);
+            }
+
+            return this._cannedKeys[id];
         },
 
         /**
@@ -6173,6 +6335,33 @@ qq.s3.util = qq.s3.util || (function() {
             }
         },
 
+        setCredentials: function(credentials, ignoreEmpty) {
+            if (credentials && credentials.secretKey) {
+                if (!credentials.accessKey) {
+                    throw new qq.Error("Invalid credentials: no accessKey");
+                }
+                else if (!credentials.expiration) {
+                    throw new qq.Error("Invalid credentials: no expiration");
+                }
+                else {
+                    this._currentCredentials = qq.extend({}, credentials);
+
+                    // Ensure expiration is a `Date`.  If initially a string, assuming it is in ISO format.
+                    if (qq.isString(credentials.expiration)) {
+                        this._currentCredentials.expiration = new Date(credentials.expiration);
+                    }
+                }
+
+                return true;
+            }
+            else if (!ignoreEmpty) {
+                throw new qq.Error("Invalid credentials parameter!");
+            }
+            else {
+                this._currentCredentials = {};
+            }
+        },
+
         /**
          * Ensures the parent's upload handler creator passes any additional S3-specific options to the handler as well
          * as information required to instantiate the specific handler based on the current browser's capabilities.
@@ -6181,17 +6370,18 @@ qq.s3.util = qq.s3.util || (function() {
          * @private
          */
         _createUploadHandler: function() {
-            var additionalOptions = {
-                objectProperties: this._options.objectProperties,
-                signature: this._options.signature,
-                iframeSupport: this._options.iframeSupport,
-                getKeyName: qq.bind(this._determineKeyName, this),
-                // pass size limit validation values to include in the request so AWS enforces this server-side
-                validation: {
-                    minSizeLimit: this._options.validation.minSizeLimit,
-                    maxSizeLimit: this._options.validation.sizeLimit
-                }
-            };
+            var self = this,
+                additionalOptions = {
+                    objectProperties: this._options.objectProperties,
+                    signature: this._options.signature,
+                    iframeSupport: this._options.iframeSupport,
+                    getKeyName: qq.bind(this._determineKeyName, this),
+                    // pass size limit validation values to include in the request so AWS enforces this server-side
+                    validation: {
+                        minSizeLimit: this._options.validation.minSizeLimit,
+                        maxSizeLimit: this._options.validation.sizeLimit
+                    }
+                };
 
             // We assume HTTP if it is missing from the start of the endpoint string.
             qq.override(this._endpointStore, function(super_) {
@@ -6207,6 +6397,39 @@ qq.s3.util = qq.s3.util || (function() {
                     }
                 };
             });
+
+            additionalOptions.signature.credentialsProvider = {
+                get: function() {
+                    return self._currentCredentials;
+                },
+
+                onExpired: function() {
+                    var updateCredentials = new qq.Promise(),
+                        callbackRetVal = self._options.callbacks.onCredentialsExpired();
+
+                    if (callbackRetVal instanceof qq.Promise) {
+                        callbackRetVal.then(function(credentials) {
+                            try {
+                                self.setCredentials(credentials);
+                                updateCredentials.success();
+                            }
+                            catch (error) {
+                                self.log("Invalid credentials returned from onCredentialsExpired callback! (" + error.message + ")", "error");
+                                updateCredentials.failure("onCredentialsExpired did not return valid credentials.");
+                            }
+                        }, function(errorMsg) {
+                            self.log("onCredentialsExpired callback indicated failure! (" + errorMsg + ")", "error");
+                            updateCredentials.failure("onCredentialsExpired callback failed.");
+                        });
+                    }
+                    else {
+                        self.log("onCredentialsExpired callback did not return a promise!", "error");
+                        updateCredentials.failure("Unexpected return value for onCredentialsExpired.");
+                    }
+
+                    return updateCredentials;
+                }
+            };
 
             return qq.FineUploaderBasic.prototype._createUploadHandler.call(this, additionalOptions, "s3");
         },
@@ -6269,14 +6492,15 @@ qq.s3.util = qq.s3.util || (function() {
          * @private
          */
         _handleKeynameFunction: function(keynameFunc, id, successCallback, failureCallback) {
-            var onSuccess = function(keyname) {
+            var self = this,
+                onSuccess = function(keyname) {
                     successCallback(keyname);
                 },
-                onFailure = function() {
-                    this.log("Failed to retrieve key name for " + id, "error");
-                    failureCallback();
+                onFailure = function(reason) {
+                    self.log(qq.format("Failed to retrieve key name for {}.  Reason: {}", id, reason || "null"), "error");
+                    failureCallback(reason);
                 },
-                keyname = keynameFunc(id);
+                keyname = keynameFunc.call(this, id);
 
 
             if (keyname instanceof qq.Promise) {
@@ -6401,21 +6625,41 @@ qq.s3.util = qq.s3.util || (function() {
             };
 
             qq.FineUploaderBasic.prototype._onSubmitDelete.call(this, id, onSuccessCallback, additionalMandatedParams);
+        },
+
+        _addCannedFile: function(sessionData) {
+            var id;
+
+            /* jshint eqnull:true */
+            if (sessionData.s3Key == null) {
+                throw new qq.Error("Did not find s3Key property in server session response.  This is required!");
+            }
+            else {
+                id = qq.FineUploaderBasic.prototype._addCannedFile.apply(this, arguments);
+                this._cannedKeys[id] = sessionData.s3Key;
+            }
+
+            return id;
         }
     });
 }());
 
-/*globals qq*/
+/* globals qq, CryptoJS */
 /**
- * Sends a POST request to the server in an attempt to solicit signatures for various S3-related requests.  This include
- * (but are not limited to) HTML Form Upload requests and Multipart Uploader requests (via the S3 REST API).
- * This module also parses the response and attempts to determine if the effort was successful.
+ * Handles signature determination for HTML Form Upload requests and Multipart Uploader requests (via the S3 REST API).
+ *
+ * If the S3 requests are to be signed server side, this module will send a POST request to the server in an attempt
+ * to solicit signatures for various S3-related requests.  This module also parses the response and attempts
+ * to determine if the effort was successful.
+ *
+ * If the S3 requests are to be signed client-side, without the help of a server, this module will utilize CryptoJS to
+ * sign the requests directly in the browser and send them off to S3.
  *
  * @param o Options associated with all such requests
  * @returns {{getSignature: Function}} API method used to initiate the signature request.
  * @constructor
  */
-qq.s3.SignatureAjaxRequester = function(o) {
+qq.s3.RequestSigner = function(o) {
     "use strict";
 
     var requester,
@@ -6425,6 +6669,7 @@ qq.s3.SignatureAjaxRequester = function(o) {
             expectingPolicy: false,
             method: "POST",
             signatureSpec: {
+                credentialsProvider: {},
                 endpoint: null,
                 customHeaders: {}
             },
@@ -6435,14 +6680,15 @@ qq.s3.SignatureAjaxRequester = function(o) {
                 sendCredentials: false
             },
             log: function(str, level) {}
-        };
+        },
+        credentialsProvider;
 
     qq.extend(options, o, true);
+    credentialsProvider = options.signatureSpec.credentialsProvider;
 
     function handleSignatureReceived(id, xhrOrXdr, isError) {
         var responseJson = xhrOrXdr.responseText,
             pendingSignatureData = pendingSignatures[id],
-            expectingPolicy = pendingSignatureData.expectingPolicy,
             promise = pendingSignatureData.promise,
             errorMessage, response;
 
@@ -6466,7 +6712,7 @@ qq.s3.SignatureAjaxRequester = function(o) {
         }
         // Make sure the response contains policy & signature properties
         else if (response) {
-            if (expectingPolicy && !response.policy) {
+            if (options.expectingPolicy && !response.policy) {
                 isError = true;
                 errorMessage = "Response does not include the base64 encoded policy!";
             }
@@ -6535,6 +6781,47 @@ qq.s3.SignatureAjaxRequester = function(o) {
         };
     }
 
+    function determineSignatureClientSide(toBeSigned, signatureEffort, updatedAccessKey, updatedSessionToken) {
+        var updatedHeaders;
+
+        // REST API request
+        if (toBeSigned.signatureConstructor) {
+            if (updatedSessionToken) {
+                updatedHeaders = toBeSigned.signatureConstructor.getHeaders();
+                updatedHeaders[qq.s3.util.SESSION_TOKEN_PARAM_NAME] = updatedSessionToken;
+                toBeSigned.signatureConstructor.withHeaders(updatedHeaders);
+            }
+
+            signApiRequest(toBeSigned.signatureConstructor.getToSign().stringToSign, signatureEffort);
+        }
+        // Form upload (w/ policy document)
+        else {
+            updatedSessionToken && qq.s3.util.refreshPolicyCredentials(toBeSigned, updatedSessionToken);
+            signPolicy(toBeSigned, signatureEffort, updatedAccessKey, updatedSessionToken);
+        }
+    }
+
+    function signPolicy(policy, signatureEffort, updatedAccessKey, updatedSessionToken) {
+        var policyStr = JSON.stringify(policy),
+            policyWordArray = CryptoJS.enc.Utf8.parse(policyStr),
+            base64Policy = CryptoJS.enc.Base64.stringify(policyWordArray),
+            policyHmacSha1 = CryptoJS.HmacSHA1(base64Policy, credentialsProvider.get().secretKey),
+            policyHmacSha1Base64 = CryptoJS.enc.Base64.stringify(policyHmacSha1);
+
+        signatureEffort.success({
+            policy: base64Policy,
+            signature: policyHmacSha1Base64
+        }, updatedAccessKey, updatedSessionToken);
+    }
+
+    function signApiRequest(headersStr, signatureEffort) {
+        var headersWordArray = CryptoJS.enc.Utf8.parse(headersStr),
+            headersHmacSha1 = CryptoJS.HmacSHA1(headersWordArray, credentialsProvider.get().secretKey),
+            headersHmacSha1Base64 = CryptoJS.enc.Base64.stringify(headersHmacSha1);
+
+        signatureEffort.success({signature: headersHmacSha1Base64});
+    }
+
     requester = new qq.AjaxRequester({
         method: options.method,
         contentType: "application/json; charset=utf-8",
@@ -6566,25 +6853,47 @@ qq.s3.SignatureAjaxRequester = function(o) {
          */
         getSignature: function(id, toBeSigned) {
             var params = toBeSigned,
-                promise = new qq.Promise();
+                signatureEffort = new qq.Promise();
 
-            options.log("Submitting S3 signature request for " + id);
+            if (credentialsProvider.get().secretKey && window.CryptoJS) {
+                if (credentialsProvider.get().expiration.getTime() > Date.now()) {
+                    determineSignatureClientSide(toBeSigned, signatureEffort);
+                }
+                // If credentials are expired, ask for new ones before attempting to sign request
+                else {
+                    credentialsProvider.onExpired().then(function() {
+                        determineSignatureClientSide(toBeSigned,
+                            signatureEffort,
+                            credentialsProvider.get().accessKey,
+                            credentialsProvider.get().sessionToken);
+                    }, function(errorMsg) {
+                        options.log("Attempt to update expired credentials apparently failed! Unable to sign request.  ", "error");
+                        signatureEffort.failure("Unable to sign request - expired credentials.");
+                    });
+                }
+            }
+            else {
+                options.log("Submitting S3 signature request for " + id);
 
-            requester.initTransport(id)
-                .withParams(params)
-                .send();
+                if (params.signatureConstructor) {
+                    params = {headers: params.signatureConstructor.getToSign().stringToSign};
+                }
 
-            pendingSignatures[id] = {
-                promise: promise,
-                expectingPolicy: options.expectingPolicy
-            };
+                requester.initTransport(id)
+                    .withParams(params)
+                    .send();
 
-            return promise;
+                pendingSignatures[id] = {
+                    promise: signatureEffort
+                };
+            }
+
+            return signatureEffort;
         },
 
         constructStringToSign: function(type, bucket, key) {
             var headers = {},
-                uploadId, contentType, partNum;
+                uploadId, contentType, partNum, toSignAndEndOfUrl;
 
             return {
                 withHeaders: function(theHeaders) {
@@ -6608,21 +6917,42 @@ qq.s3.SignatureAjaxRequester = function(o) {
                 },
 
                 getToSign: function() {
+                    var sessionToken = credentialsProvider.get().sessionToken;
+
                     headers["x-amz-date"] = new Date().toUTCString();
-                    var toSignAndEndOfUrl = getToSignAndEndOfUrl(type, bucket, key, contentType, headers, uploadId, partNum);
+
+                    if (sessionToken) {
+                        headers[qq.s3.util.SESSION_TOKEN_PARAM_NAME] = sessionToken;
+                    }
+
+                    toSignAndEndOfUrl = getToSignAndEndOfUrl(type, bucket, key, contentType, headers, uploadId, partNum);
 
                     return {
-                        headers: contentType ? qq.extend(headers, {"Content-Type": contentType}) : headers,
+                        headers: (function() {
+                            if (contentType) {
+                                headers["Content-Type"] = contentType;
+                            }
+
+                            return headers;
+                        }()),
                         endOfUrl: toSignAndEndOfUrl.endOfUrl,
                         stringToSign: toSignAndEndOfUrl.toSign
                     };
+                },
+
+                getHeaders: function() {
+                    return qq.extend({}, headers);
+                },
+
+                getEndOfUrl: function() {
+                    return toSignAndEndOfUrl && toSignAndEndOfUrl.endOfUrl;
                 }
             };
         }
     });
 };
 
-qq.s3.SignatureAjaxRequester.prototype.REQUEST_TYPE = {
+qq.s3.RequestSigner.prototype.REQUEST_TYPE = {
     MULTIPART_INITIATE: "multipart_initiate",
     MULTIPART_COMPLETE: "multipart_complete",
     MULTIPART_ABORT: "multipart_abort",
@@ -6762,7 +7092,6 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
             endpointStore: null,
             paramsStore: null,
             signatureSpec: null,
-            accessKey: null,
             acl: "private",
             reducedRedundancy: false,
             maxConnections: 3,
@@ -6775,7 +7104,7 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
 
     qq.extend(options, o);
 
-    getSignatureAjaxRequester = new qq.s3.SignatureAjaxRequester({
+    getSignatureAjaxRequester = new qq.s3.RequestSigner({
         signatureSpec: options.signatureSpec,
         cors: options.cors,
         log: options.log
@@ -6796,12 +7125,12 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
             headers = {},
             promise = new qq.Promise(),
             key = options.getKey(id),
-            toSign;
+            signatureConstructor;
 
         headers["x-amz-acl"] = options.acl;
 
         if (options.reducedRedundancy) {
-            headers["x-amz-storage-class"] = "REDUCED_REDUNDANCY";
+            headers[qq.s3.util.REDUCED_REDUNDANCY_PARAM_NAME] = qq.s3.util.REDUCED_REDUNDANCY_PARAM_VALUE;
         }
 
         headers[qq.s3.util.AWS_PARAM_PREFIX + options.filenameParam] = encodeURIComponent(options.getName(id));
@@ -6810,18 +7139,16 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
             headers[qq.s3.util.AWS_PARAM_PREFIX + name] = encodeURIComponent(val);
         });
 
-        toSign = getSignatureAjaxRequester.constructStringToSign
+        signatureConstructor = getSignatureAjaxRequester.constructStringToSign
             (getSignatureAjaxRequester.REQUEST_TYPE.MULTIPART_INITIATE, bucket, key)
             .withContentType(options.getContentType(id))
-            .withHeaders(headers)
-            .getToSign();
-
-        headers = toSign.headers;
+            .withHeaders(headers);
 
         // Ask the local server to sign the request.  Use this signature to form the Authorization header.
-        getSignatureAjaxRequester.getSignature(id, {headers: toSign.stringToSign}).then(function(response) {
-            headers.Authorization = "AWS " + options.accessKey + ":" + response.signature;
-            promise.success(headers, toSign.endOfUrl);
+        getSignatureAjaxRequester.getSignature(id, {signatureConstructor: signatureConstructor}).then(function(response) {
+            headers = signatureConstructor.getHeaders();
+            headers.Authorization = "AWS " + options.signatureSpec.credentialsProvider.get().accessKey + ":" + response.signature;
+            promise.success(headers, signatureConstructor.getEndOfUrl());
         }, promise.failure);
 
         return promise;
@@ -6939,7 +7266,6 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
             contentType: "text/xml",
             endpointStore: null,
             signatureSpec: null,
-            accessKey: null,
             maxConnections: 3,
             getKey: function(id) {},
             log: function(str, level) {}
@@ -6949,7 +7275,7 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
     qq.extend(options, o);
 
     // Transport for requesting signatures (for the "Complete" requests) from the local server
-    getSignatureAjaxRequester = new qq.s3.SignatureAjaxRequester({
+    getSignatureAjaxRequester = new qq.s3.RequestSigner({
         signatureSpec: options.signatureSpec,
         cors: options.cors,
         log: options.log
@@ -6969,18 +7295,16 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
             promise = new qq.Promise(),
             endpoint = options.endpointStore.getEndpoint(id),
             bucket = qq.s3.util.getBucket(endpoint),
-            toSign = getSignatureAjaxRequester.constructStringToSign
+            signatureConstructor = getSignatureAjaxRequester.constructStringToSign
                 (getSignatureAjaxRequester.REQUEST_TYPE.MULTIPART_COMPLETE, bucket, options.getKey(id))
                 .withUploadId(uploadId)
-                .withContentType("application/xml; charset=UTF-8")
-                .getToSign();
-
-        headers = toSign.headers;
+                .withContentType("application/xml; charset=UTF-8");
 
         // Ask the local server to sign the request.  Use this signature to form the Authorization header.
-        getSignatureAjaxRequester.getSignature(id, {headers: toSign.stringToSign}).then(function(response) {
-            headers.Authorization = "AWS " + options.accessKey + ":" + response.signature;
-            promise.success(headers, toSign.endOfUrl);
+        getSignatureAjaxRequester.getSignature(id, {signatureConstructor: signatureConstructor}).then(function(response) {
+            headers = signatureConstructor.getHeaders();
+            headers.Authorization = "AWS " + options.signatureSpec.credentialsProvider.get().accessKey + ":" + response.signature;
+            promise.success(headers, signatureConstructor.getEndOfUrl());
         }, promise.failure);
 
         return promise;
@@ -7126,7 +7450,6 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
             method: "DELETE",
             endpointStore: null,
             signatureSpec: null,
-            accessKey: null,
             maxConnections: 3,
             getKey: function(id) {},
             log: function(str, level) {}
@@ -7136,7 +7459,7 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
     qq.extend(options, o);
 
     // Transport for requesting signatures (for the "Complete" requests) from the local server
-    getSignatureAjaxRequester = new qq.s3.SignatureAjaxRequester({
+    getSignatureAjaxRequester = new qq.s3.RequestSigner({
         signatureSpec: options.signatureSpec,
         cors: options.cors,
         log: options.log
@@ -7156,17 +7479,15 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
             promise = new qq.Promise(),
             endpoint = options.endpointStore.getEndpoint(id),
             bucket = qq.s3.util.getBucket(endpoint),
-            toSign = getSignatureAjaxRequester.constructStringToSign
+            signatureConstructor = getSignatureAjaxRequester.constructStringToSign
                 (getSignatureAjaxRequester.REQUEST_TYPE.MULTIPART_ABORT, bucket, options.getKey(id))
-                .withUploadId(uploadId)
-                .getToSign();
-
-        headers = toSign.headers;
+                .withUploadId(uploadId);
 
         // Ask the local server to sign the request.  Use this signature to form the Authorization header.
-        getSignatureAjaxRequester.getSignature(id, {headers: toSign.stringToSign}).then(function(response) {
-            headers.Authorization = "AWS " + options.accessKey + ":" + response.signature;
-            promise.success(headers, toSign.endOfUrl);
+        getSignatureAjaxRequester.getSignature(id, {signatureConstructor: signatureConstructor}).then(function(response) {
+            headers = signatureConstructor.getHeaders();
+            headers.Authorization = "AWS " + options.signatureSpec.credentialsProvider.get().accessKey + ":" + response.signature;
+            promise.success(headers, signatureConstructor.getEndOfUrl());
         }, promise.failure);
 
         return promise;
@@ -7248,29 +7569,30 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
  * AWS API.
  *
  * @param options Options passed from the base handler
- * @param uploadCompleteCallback Callback to invoke when the upload has completed, regardless of success.
- * @param onUuidChanged Callback to invoke when the associated items UUID has changed by order of the server.
- * @param logCallback Used to posting log messages.
+ * @param proxy Callbacks & methods used to query for or push out data/changes
  */
-qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChanged, logCallback) {
+qq.s3.UploadHandlerForm = function(options, proxy) {
     "use strict";
 
-    var publicApi = this,
-        fileState = [],
-        log = logCallback,
+    var fileState = [],
+        uploadCompleteCallback = proxy.onUploadComplete,
+        onUuidChanged = proxy.onUuidChanged,
+        getName = proxy.getName,
+        getUuid = proxy.getUuid,
+        log = proxy.log,
         onCompleteCallback = options.onComplete,
         onUpload = options.onUpload,
         onGetKeyName = options.getKeyName,
         filenameParam = options.filenameParam,
         paramsStore = options.paramsStore,
         endpointStore = options.endpointStore,
-        accessKey = options.accessKey,
         acl = options.objectProperties.acl,
         reducedRedundancy = options.objectProperties.reducedRedundancy,
         validation = options.validation,
         signature = options.signature,
         successRedirectUrl = options.iframeSupport.localBlankPagePath,
-        getSignatureAjaxRequester = new qq.s3.SignatureAjaxRequester({
+        credentialsProvider = options.signature.credentialsProvider,
+        getSignatureAjaxRequester = new qq.s3.RequestSigner({
             signatureSpec: signature,
             cors: options.cors,
             log: log
@@ -7324,13 +7646,14 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
         /*jshint -W040 */
         var customParams = paramsStore.getParams(id);
 
-        customParams[filenameParam] = publicApi.getName(id);
+        customParams[filenameParam] = getName(id);
 
         return qq.s3.util.generateAwsParams({
                 endpoint: endpointStore.getEndpoint(id),
                 params: customParams,
                 key: fileState[id].key,
-                accessKey: accessKey,
+                accessKey: credentialsProvider.get().accessKey,
+                sessionToken: credentialsProvider.get().sessionToken,
                 acl: acl,
                 minFileSize: validation.minSizeLimit,
                 maxFileSize: validation.maxSizeLimit,
@@ -7348,7 +7671,7 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
         var promise = new qq.Promise(),
             method = options.demoMode ? "GET" : "POST",
             endpoint = options.endpointStore.getEndpoint(id),
-            fileName = publicApi.getName(id);
+            fileName = getName(id);
 
         generateAwsParams(id).then(function(params) {
             var form = internalApi.initFormForUpload({
@@ -7369,7 +7692,7 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
     }
 
     function handleUpload(id) {
-        var fileName = publicApi.getName(id),
+        var fileName = getName(id),
             iframe = internalApi.createIframe(id),
             input = fileState[id].input;
 
@@ -7412,7 +7735,7 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
     function handleFinishedUpload(id, iframe, fileName, response) {
         internalApi.detachLoadEvent(id);
 
-        qq(iframe).remove();
+        iframe && qq(iframe).remove();
 
         if (!response.success) {
             if (options.onAutoRetry(id, fileName, response)) {
@@ -7423,15 +7746,17 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
         uploadCompleteCallback(id);
     }
 
-    qq.extend(this, new qq.UploadHandlerFormApi(internalApi, fileState, false, "file", options.onCancel, onUuidChanged, log));
+    qq.extend(this, new qq.UploadHandlerFormApi(internalApi,
+        {fileState: fileState, isCors: false, inputName: "file"},
+        {onCancel: options.onCancel, onUuidChanged: onUuidChanged, getName: getName, getUuid: getUuid, log: log}));
 
     qq.extend(this, {
         upload: function(id) {
             var input = fileState[id].input,
-                name = this.getName(id);
+                name = getName(id);
 
             if (!input){
-                throw new Error("file with passed id was not added, or already uploaded or cancelled");
+                throw new Error("file with passed id was not added, or already uploaded or canceled");
             }
 
             if (this.isValid(id)) {
@@ -7444,6 +7769,8 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
                     onGetKeyName(id, name).then(function(key) {
                         fileState[id].key = key;
                         handleUpload(id);
+                    }, function(errorReason) {
+                        handleFinishedUpload(id, null, name, {error: errorReason});
                     });
                 }
             }
@@ -7462,41 +7789,45 @@ qq.s3.UploadHandlerForm = function(options, uploadCompleteCallback, onUuidChange
  *
  * If chunking is supported and enabled, the S3 Multipart Upload REST API is utilized.
  *
- * @param options Options passed from the base handler
- * @param uploadCompleteCallback Callback to invoke when the upload has completed, regardless of success.
- * @param onUuidChanged Callback to invoke when the associated items UUID has changed by order of the server.
- * @param logCallback Used to posting log messages.
+ * @param spec Options passed from the base handler
+ * @param proxy Callbacks & methods used to query for or push out data/changes
  */
-qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged, log) {
+qq.s3.UploadHandlerXhr = function(spec, proxy) {
     "use strict";
 
     var fileState = [],
+        uploadCompleteCallback = proxy.onUploadComplete,
+        onUuidChanged = proxy.onUuidChanged,
+        getName = proxy.getName,
+        getUuid = proxy.getUuid,
+        getSize = proxy.getSize,
+        log = proxy.log,
         expectedStatus = 200,
-        onProgress = options.onProgress,
-        onComplete = options.onComplete,
-        onUpload = options.onUpload,
-        onGetKeyName = options.getKeyName,
-        filenameParam = options.filenameParam,
-        paramsStore = options.paramsStore,
-        endpointStore = options.endpointStore,
-        accessKey = options.accessKey,
-        acl = options.objectProperties.acl,
-        reducedRedundancy = options.objectProperties.reducedRedundancy,
-        validation = options.validation,
-        signature = options.signature,
-        chunkingPossible = options.chunking.enabled && qq.supportedFeatures.chunking,
-        resumeEnabled = options.resume.enabled && chunkingPossible && qq.supportedFeatures.resume && window.localStorage !== undefined,
+        onProgress = spec.onProgress,
+        onComplete = spec.onComplete,
+        onUpload = spec.onUpload,
+        onGetKeyName = spec.getKeyName,
+        filenameParam = spec.filenameParam,
+        paramsStore = spec.paramsStore,
+        endpointStore = spec.endpointStore,
+        acl = spec.objectProperties.acl,
+        reducedRedundancy = spec.objectProperties.reducedRedundancy,
+        validation = spec.validation,
+        signature = spec.signature,
+        chunkingPossible = spec.chunking.enabled && qq.supportedFeatures.chunking,
+        resumeEnabled = spec.resume.enabled && chunkingPossible && qq.supportedFeatures.resume && window.localStorage !== undefined,
         internalApi = {},
         publicApi = this,
-        policySignatureRequester = new qq.s3.SignatureAjaxRequester({
+        credentialsProvider = spec.signature.credentialsProvider,
+        policySignatureRequester = new qq.s3.RequestSigner({
             expectingPolicy: true,
             signatureSpec: signature,
-            cors: options.cors,
+            cors: spec.cors,
             log: log
         }),
-        restSignatureRequester = new qq.s3.SignatureAjaxRequester({
+        restSignatureRequester = new qq.s3.RequestSigner({
             signatureSpec: signature,
-            cors: options.cors,
+            cors: spec.cors,
             log: log
         }),
         initiateMultipartRequester = new qq.s3.InitiateMultipartAjaxRequester({
@@ -7504,10 +7835,9 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
             endpointStore: endpointStore,
             paramsStore: paramsStore,
             signatureSpec: signature,
-            accessKey: options.accessKey,
             acl: acl,
             reducedRedundancy: reducedRedundancy,
-            cors: options.cors,
+            cors: spec.cors,
             log: log,
             getContentType: function(id) {
                 return publicApi.getFile(id).type;
@@ -7516,14 +7846,13 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
                 return getUrlSafeKey(id);
             },
             getName: function(id) {
-                return publicApi.getName(id);
+                return getName(id);
             }
         }),
         completeMultipartRequester = new qq.s3.CompleteMultipartAjaxRequester({
             endpointStore: endpointStore,
             signatureSpec: signature,
-            accessKey: options.accessKey,
-            cors: options.cors,
+            cors: spec.cors,
             log: log,
             getKey: function(id) {
                 return getUrlSafeKey(id);
@@ -7532,8 +7861,7 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
         abortMultipartRequester = new qq.s3.AbortMultipartAjaxRequester({
             endpointStore: endpointStore,
             signatureSpec: signature,
-            accessKey: options.accessKey,
-            cors: options.cors,
+            cors: spec.cors,
             log: log,
             getKey: function(id) {
                 return getUrlSafeKey(id);
@@ -7619,8 +7947,8 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
      */
     function uploadCompleted(id, errorDetails, requestXhr) {
         var xhr = requestXhr || fileState[id].xhr,
-            name = publicApi.getName(id),
-            size = publicApi.getSize(id),
+            name = getName(id),
+            size = getSize(id),
             // This is the response we will use internally to determine if we need to do something special in case of a failure
             responseToExamine = parseResponse(id, requestXhr),
             // This is the response we plan on passing to external callbacks
@@ -7640,7 +7968,7 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
         }
 
         // If this upload failed AND we are expecting an auto-retry, we are not done yet.  Otherwise, we are done.
-        if (!isError || !options.onAutoRetry(id, name, responseToBubble, xhr)) {
+        if (!isError || !spec.onAutoRetry(id, name, responseToBubble, xhr)) {
             log(qq.format("Upload attempt for file ID {} to S3 is complete", id));
 
             // If the upload has not failed and has not been paused, clean up state date
@@ -7726,7 +8054,7 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
     }
 
     function handleStartUploadSignal(id, retry) {
-        var name = publicApi.getName(id);
+        var name = getName(id);
 
         if (publicApi.isValid(id)) {
             maybePrepareForResume(id);
@@ -7742,6 +8070,8 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
                     setKey(id, key);
                     onUpload(id, name);
                     handleUpload(id);
+                }, function(errorReason) {
+                    uploadCompleted(id, {error: errorReason});
                 });
             }
         }
@@ -7753,7 +8083,7 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
     // Starting point for incoming requests for simple (non-chunked) uploads.
     function handleSimpleUpload(id) {
         var xhr = fileState[id].xhr,
-            name = publicApi.getName(id),
+            name = getName(id),
             fileOrBlob = publicApi.getFile(id);
 
         xhr.upload.onprogress = function(e){
@@ -7784,14 +8114,15 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
     function generateAwsParams(id) {
         /*jshint -W040 */
         var customParams = paramsStore.getParams(id);
-        customParams[filenameParam] = publicApi.getName(id);
+        customParams[filenameParam] = getName(id);
 
         return qq.s3.util.generateAwsParams({
                 endpoint: endpointStore.getEndpoint(id),
                 params: customParams,
                 type: fileState[id].type,
                 key: getActualKey(id),
-                accessKey: accessKey,
+                accessKey: credentialsProvider.get().accessKey,
+                sessionToken: credentialsProvider.get().sessionToken,
                 acl: acl,
                 expectedStatus: expectedStatus,
                 minFileSize: validation.minSizeLimit,
@@ -7861,11 +8192,11 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
 
             // If we haven't found this item in local storage, give up
             if (persistedData) {
-                log(qq.format("Identified file with ID {} and name of {} as resumable.", id, publicApi.getName(id)));
+                log(qq.format("Identified file with ID {} and name of {} as resumable.", id, getName(id)));
 
                 persistedData = JSON.parse(persistedData);
 
-                fileState[id].uuid = persistedData.uuid;
+                onUuidChanged(id, persistedData.uuid);
                 setKey(id, persistedData.key);
                 fileState[id].loaded = persistedData.loaded;
                 fileState[id].chunking = persistedData.chunking;
@@ -7882,9 +8213,9 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
             localStorageId = getLocalStorageId(id);
 
             persistedData = {
-                name: publicApi.getName(id),
-                size: publicApi.getSize(id),
-                uuid: publicApi.getUuid(id),
+                name: getName(id),
+                size: getSize(id),
+                uuid: getUuid(id),
                 key: getActualKey(id),
                 loaded: fileState[id].loaded,
                 chunking: fileState[id].chunking,
@@ -7947,7 +8278,7 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
 
     // Deletes any local storage records that are "expired".
     function removeExpiredChunkingRecords() {
-        var expirationDays = options.resume.recordsExpireIn;
+        var expirationDays = spec.resume.recordsExpireIn;
 
         iterateResumeRecords(function(key, uploadData) {
             var expirationDate = new Date(uploadData.lastUpdated);
@@ -7967,10 +8298,10 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
      * @returns {string} Identifier for this item that may appear in the browser's local storage
      */
     function getLocalStorageId(id) {
-        var name = publicApi.getName(id),
-            size = publicApi.getSize(id),
-            chunkSize = options.chunking.partSize,
-            endpoint = options.endpointStore.getEndpoint(id),
+        var name = getName(id),
+            size = getSize(id),
+            chunkSize = spec.chunking.partSize,
+            endpoint = spec.endpointStore.getEndpoint(id),
             bucket = qq.s3.util.getBucket(endpoint);
 
         return qq.format("qqs3resume-{}-{}-{}-{}", name, size, chunkSize, bucket);
@@ -8061,24 +8392,24 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
     // Initiate the process to send the next chunk for a file.  This assumes there IS a "next" chunk.
     function uploadNextChunk(id) {
         var idx = getNextPartIdxToSend(id),
-            name = publicApi.getName(id),
+            name = getName(id),
             xhr = fileState[id].xhr,
-            totalFileSize = publicApi.getSize(id),
+            totalFileSize = getSize(id),
             chunkData = internalApi.getChunkData(id, idx),
-            domain = options.endpointStore.getEndpoint(id);
+            domain = spec.endpointStore.getEndpoint(id);
 
         // Add appropriate headers to the multipart upload request.
         // Once these have been determined (asynchronously) attach the headers and send the chunk.
         addChunkedHeaders(id).then(function(headers, endOfUrl) {
             var url = domain + "/" + endOfUrl;
 
-            options.onUploadChunk(id, name, internalApi.getChunkDataForCallback(chunkData));
+            spec.onUploadChunk(id, name, internalApi.getChunkDataForCallback(chunkData));
 
             xhr.upload.onprogress = function(e) {
                 if (e.lengthComputable) {
                     var totalLoaded = e.loaded + fileState[id].loaded;
 
-                    options.onProgress(id, name, totalLoaded, totalFileSize);
+                    spec.onProgress(id, name, totalLoaded, totalFileSize);
                 }
             };
 
@@ -8109,22 +8440,20 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
      */
     function addChunkedHeaders(id) {
         var headers = {},
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = spec.endpointStore.getEndpoint(id),
             bucket = qq.s3.util.getBucket(endpoint),
             key = getUrlSafeKey(id),
             promise = new qq.Promise(),
-            toSign = restSignatureRequester.constructStringToSign
+            signatureConstructor = restSignatureRequester.constructStringToSign
                 (restSignatureRequester.REQUEST_TYPE.MULTIPART_UPLOAD, bucket, key)
                 .withPartNum(getNextPartIdxToSend(id) + 1)
-                .withUploadId(fileState[id].chunking.uploadId)
-                .getToSign();
-
-        headers = toSign.headers;
+                .withUploadId(fileState[id].chunking.uploadId);
 
         // Ask the local server to sign the request.  Use this signature to form the Authorization header.
-        restSignatureRequester.getSignature(id, {headers: toSign.stringToSign}).then(function(response) {
-            headers.Authorization = "AWS " + options.accessKey + ":" + response.signature;
-            promise.success(headers, toSign.endOfUrl);
+        restSignatureRequester.getSignature(id, {signatureConstructor: signatureConstructor}).then(function(response) {
+            headers = signatureConstructor.getHeaders();
+            headers.Authorization = "AWS " + credentialsProvider.get().accessKey + ":" + response.signature;
+            promise.success(headers, signatureConstructor.getEndOfUrl());
         }, promise.failure);
 
         return promise;
@@ -8175,7 +8504,7 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
 
             maybePersistChunkedState(id);
 
-            options.onUploadChunkSuccess(id, chunkData, response, xhr);
+            spec.onUploadChunkSuccess(id, internalApi.getChunkDataForCallback(chunkData), response, xhr);
 
             // We might not be done with this file...
             maybeUploadNextChunk(id);
@@ -8192,12 +8521,9 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
 
     qq.extend(this, new qq.UploadHandlerXhrApi(
         internalApi,
-        fileState,
-        chunkingPossible ? options.chunking : null,
-        handleStartUploadSignal,
-        options.onCancel,
-        onUuidChanged,
-        log
+        {fileState: fileState, chunking: chunkingPossible ? spec.chunking : null},
+        {onUpload: handleStartUploadSignal, onCancel: spec.onCancel, onUuidChanged: onUuidChanged, getName: getName,
+            getSize: getSize, getUuid: getUuid, log: log}
     ));
 
 
@@ -8207,14 +8533,12 @@ qq.s3.UploadHandlerXhr = function(options, uploadCompleteCallback, onUuidChanged
     // Base XHR API overrides
     qq.override(this, function(super_) {
         return {
-            add: function(fileOrBlobData) {
-                var id = super_.add(fileOrBlobData);
+            add: function(id, fileOrBlobData) {
+                super_.add.apply(this, arguments);
 
                 if (resumeEnabled) {
                     maybePrepareForResume(id);
                 }
-
-                return id;
             },
 
             getResumableFilesData: function() {
@@ -8353,11 +8677,12 @@ qq.PasteSupport = function(o) {
     });
 };
 
-/*globals qq, document*/
+/*globals qq, document, CustomEvent*/
 qq.DragAndDrop = function(o) {
     "use strict";
 
     var options,
+        HIDE_ZONES_EVENT_NAME = "qq-hidezones",
         HIDE_BEFORE_ENTER_ATTR = "qq-hide-dropzone",
         uploadDropZones = [],
         droppedFiles = [],
@@ -8375,9 +8700,12 @@ qq.DragAndDrop = function(o) {
     qq.extend(options, o, true);
 
     function uploadDroppedFiles(files, uploadDropZone) {
+        // We need to convert the `FileList` to an actual `Array` to avoid iteration issues
+        var filesAsArray = Array.prototype.slice.call(files);
+
         options.callbacks.dropLog("Grabbed " + files.length + " dropped files.");
         uploadDropZone.dropDisabled(false);
-        options.callbacks.processingDroppedFilesComplete(files);
+        options.callbacks.processingDroppedFilesComplete(filesAsArray, uploadDropZone.getElement());
     }
 
     function traverseFileTree(entry) {
@@ -8472,6 +8800,7 @@ qq.DragAndDrop = function(o) {
 
     function setupDropzone(dropArea) {
         var dropZone = new qq.UploadDropZone({
+            HIDE_ZONES_EVENT_NAME: HIDE_ZONES_EVENT_NAME,
             element: dropArea,
             onEnter: function(e){
                 qq(dropArea).addClass(options.classes.dropActive);
@@ -8481,9 +8810,6 @@ qq.DragAndDrop = function(o) {
                 qq(dropArea).removeClass(options.classes.dropActive);
             },
             onDrop: function(e){
-                qq(dropArea).hasAttribute(HIDE_BEFORE_ENTER_ATTR) && qq(dropArea).hide();
-                qq(dropArea).removeClass(options.classes.dropActive);
-
                 handleDataTransfer(e.dataTransfer, dropZone).done(function() {
                     uploadDroppedFiles(droppedFiles, dropZone);
                 });
@@ -8550,11 +8876,19 @@ qq.DragAndDrop = function(o) {
                 });
             }
         });
+
         disposeSupport.attach(document, "drop", function(e){
             qq.each(dropZones, function(idx, dropZone) {
                 qq(dropZone).hasAttribute(HIDE_BEFORE_ENTER_ATTR) && qq(dropZone).hide();
             });
             e.preventDefault();
+        });
+
+        disposeSupport.attach(document, HIDE_ZONES_EVENT_NAME, function(e) {
+            qq.each(options.dropZoneElements, function(idx, zone) {
+                qq(zone).hasAttribute(HIDE_BEFORE_ENTER_ATTR) && qq(zone).hide();
+                qq(zone).removeClass(options.classes.dropActive);
+            });
         });
     }
 
@@ -8591,7 +8925,7 @@ qq.DragAndDrop.callbacks = function() {
 
     return {
         processingDroppedFiles: function() {},
-        processingDroppedFilesComplete: function(files) {},
+        processingDroppedFilesComplete: function(files, targetEl) {},
         dropError: function(code, errorSpecifics) {
             qq.log("Drag & drop error code '" + code + " with these specifics: '" + errorSpecifics + "'", "error");
         },
@@ -8604,7 +8938,8 @@ qq.DragAndDrop.callbacks = function() {
 qq.UploadDropZone = function(o){
     "use strict";
 
-    var options, element, preventDrop, dropOutsideDisabled, disposeSupport = new qq.DisposeSupport();
+    var disposeSupport = new qq.DisposeSupport(),
+        options, element, preventDrop, dropOutsideDisabled;
 
     options = {
         element: null,
@@ -8671,6 +9006,29 @@ qq.UploadDropZone = function(o){
         return preventDrop;
     }
 
+    function triggerHidezonesEvent() {
+        var hideZonesEvent;
+
+        function triggerUsingOldApi() {
+            hideZonesEvent = document.createEvent("Event");
+            hideZonesEvent.initEvent(options.HIDE_ZONES_EVENT_NAME, true, true);
+        }
+
+        if (window.CustomEvent) {
+            try {
+                hideZonesEvent = new CustomEvent(options.HIDE_ZONES_EVENT_NAME);
+            }
+            catch (err) {
+                triggerUsingOldApi();
+            }
+        }
+        else {
+            triggerUsingOldApi();
+        }
+
+        document.dispatchEvent(hideZonesEvent);
+    }
+
     function attachEvents(){
         disposeSupport.attach(element, "dragover", function(e){
             if (!isValidFileDrag(e)) {
@@ -8715,14 +9073,17 @@ qq.UploadDropZone = function(o){
             options.onLeaveNotDescendants(e);
         });
 
-        disposeSupport.attach(element, "drop", function(e){
+        disposeSupport.attach(element, "drop", function(e) {
             if (!isOrSetDropDisabled()) {
                 if (!isValidFileDrag(e)) {
                     return;
                 }
 
                 e.preventDefault();
+                e.stopPropagation();
                 options.onDrop(e);
+
+                triggerHidezonesEvent();
             }
         });
     }
@@ -8737,12 +9098,15 @@ qq.UploadDropZone = function(o){
 
         dispose: function() {
             disposeSupport.dispose();
+        },
+
+        getElement: function() {
+            return element;
         }
     });
 };
 
 /*globals qq, XMLHttpRequest*/
-/** Generic class for sending non-upload ajax requests and handling the associated responses **/
 qq.DeleteFileAjaxRequester = function(o) {
     "use strict";
 
@@ -9783,6 +10147,162 @@ qq.ImageValidation = function(blob, log) {
     };
 };
 
+/* globals qq */
+/**
+ * Module used to control populating the initial list of files.
+ *
+ * @constructor
+ */
+qq.Session = function(spec) {
+    "use strict";
+
+    var options = {
+        endpoint: null,
+        params: {},
+        customHeaders: {},
+        cors: {},
+        addFileRecord: function(sessionData) {},
+        log: function(message, level) {}
+    };
+
+    qq.extend(options, spec, true);
+
+
+    function isJsonResponseValid(response) {
+        if (qq.isArray(response)) {
+            return true;
+        }
+
+        options.log("Session response is not an array.", "error");
+    }
+
+    function handleFileItems(fileItems, success, xhrOrXdr, promise) {
+        var someItemsIgnored = false;
+
+        success = success && isJsonResponseValid(fileItems);
+
+        if (success) {
+            qq.each(fileItems, function(idx, fileItem) {
+                /* jshint eqnull:true */
+                if (fileItem.uuid == null) {
+                    someItemsIgnored = true;
+                    options.log(qq.format("Session response item {} did not include a valid UUID - ignoring.", idx), "error");
+                }
+                else if (fileItem.name == null) {
+                    someItemsIgnored = true;
+                    options.log(qq.format("Session response item {} did not include a valid name - ignoring.", idx), "error");
+                }
+                else {
+                    try {
+                        options.addFileRecord(fileItem);
+                        return true;
+                    }
+                    catch(err) {
+                        someItemsIgnored = true;
+                        options.log(err.message, "error");
+                    }
+                }
+
+                return false;
+            });
+        }
+
+        promise[success && !someItemsIgnored ? "success" : "failure"](fileItems, xhrOrXdr);
+    }
+
+    // Initiate a call to the server that will be used to populate the initial file list.
+    // Returns a `qq.Promise`.
+    this.refresh = function() {
+        /*jshint indent:false */
+        var refreshEffort = new qq.Promise(),
+            refreshCompleteCallback = function(response, success, xhrOrXdr) {
+                handleFileItems(response, success, xhrOrXdr, refreshEffort);
+            },
+            requsterOptions = qq.extend({}, options),
+            requester = new qq.SessionAjaxRequester(
+                qq.extend(requsterOptions, {onComplete: refreshCompleteCallback})
+            );
+
+        requester.queryServer();
+
+        return refreshEffort;
+    };
+};
+
+/*globals qq, XMLHttpRequest*/
+/**
+ * Thin module used to send GET requests to the server, expecting information about session
+ * data used to initialize an uploader instance.
+ *
+ * @param spec Various options used to influence the associated request.
+ * @constructor
+ */
+qq.SessionAjaxRequester = function(spec) {
+    "use strict";
+
+    var requester,
+        options = {
+            endpoint: null,
+            customHeaders: {},
+            params: {},
+            cors: {
+                expected: false,
+                sendCredentials: false
+            },
+            onComplete: function(response, success, xhrOrXdr) {},
+            log: function(str, level) {}
+        };
+
+    qq.extend(options, spec);
+
+    function onComplete(id, xhrOrXdr, isError) {
+        var response = null;
+
+        /* jshint eqnull:true */
+        if (xhrOrXdr.responseText != null) {
+            try {
+                response = qq.parseJson(xhrOrXdr.responseText);
+            }
+            catch(err) {
+                options.log("Problem parsing session response: " + err.message, "error");
+                isError = true;
+            }
+        }
+
+        options.onComplete(response, !isError, xhrOrXdr);
+    }
+
+    requester = new qq.AjaxRequester({
+        validMethods: ["GET"],
+        method: "GET",
+        endpointStore: {
+            getEndpoint: function() {
+                return options.endpoint;
+            }
+        },
+        customHeaders: options.customHeaders,
+        log: options.log,
+        onComplete: onComplete,
+        cors: options.cors
+    });
+
+
+    qq.extend(this, {
+        queryServer: function() {
+            var params = qq.extend({}, options.params);
+
+            // cache buster, particularly for IE & iOS
+            params.qqtimestamp = new Date().getTime();
+
+            options.log("Session query request.");
+
+            requester.initTransport("sessionRefresh")
+                .withParams(params)
+                .send();
+        }
+    });
+};
+
 /*globals qq */
 // Base handler for UI (FineUploader mode) events.
 // Some more specific handlers inherit from this one.
@@ -10071,3 +10591,1095 @@ qq.FilenameEditHandler = function(s, inheritedInternalApi) {
         }
     });
 };
+
+/*
+CryptoJS v3.1.2
+code.google.com/p/crypto-js
+(c) 2009-2013 by Jeff Mott. All rights reserved.
+code.google.com/p/crypto-js/wiki/License
+*/
+/**
+ * CryptoJS core components.
+ */
+var CryptoJS = CryptoJS || (function (Math, undefined) {
+    /**
+     * CryptoJS namespace.
+     */
+    var C = {};
+
+    /**
+     * Library namespace.
+     */
+    var C_lib = C.lib = {};
+
+    /**
+     * Base object for prototypal inheritance.
+     */
+    var Base = C_lib.Base = (function () {
+        function F() {}
+
+        return {
+            /**
+             * Creates a new object that inherits from this object.
+             *
+             * @param {Object} overrides Properties to copy into the new object.
+             *
+             * @return {Object} The new object.
+             *
+             * @static
+             *
+             * @example
+             *
+             *     var MyType = CryptoJS.lib.Base.extend({
+             *         field: 'value',
+             *
+             *         method: function () {
+             *         }
+             *     });
+             */
+            extend: function (overrides) {
+                // Spawn
+                F.prototype = this;
+                var subtype = new F();
+
+                // Augment
+                if (overrides) {
+                    subtype.mixIn(overrides);
+                }
+
+                // Create default initializer
+                if (!subtype.hasOwnProperty('init')) {
+                    subtype.init = function () {
+                        subtype.$super.init.apply(this, arguments);
+                    };
+                }
+
+                // Initializer's prototype is the subtype object
+                subtype.init.prototype = subtype;
+
+                // Reference supertype
+                subtype.$super = this;
+
+                return subtype;
+            },
+
+            /**
+             * Extends this object and runs the init method.
+             * Arguments to create() will be passed to init().
+             *
+             * @return {Object} The new object.
+             *
+             * @static
+             *
+             * @example
+             *
+             *     var instance = MyType.create();
+             */
+            create: function () {
+                var instance = this.extend();
+                instance.init.apply(instance, arguments);
+
+                return instance;
+            },
+
+            /**
+             * Initializes a newly created object.
+             * Override this method to add some logic when your objects are created.
+             *
+             * @example
+             *
+             *     var MyType = CryptoJS.lib.Base.extend({
+             *         init: function () {
+             *             // ...
+             *         }
+             *     });
+             */
+            init: function () {
+            },
+
+            /**
+             * Copies properties into this object.
+             *
+             * @param {Object} properties The properties to mix in.
+             *
+             * @example
+             *
+             *     MyType.mixIn({
+             *         field: 'value'
+             *     });
+             */
+            mixIn: function (properties) {
+                for (var propertyName in properties) {
+                    if (properties.hasOwnProperty(propertyName)) {
+                        this[propertyName] = properties[propertyName];
+                    }
+                }
+
+                // IE won't copy toString using the loop above
+                if (properties.hasOwnProperty('toString')) {
+                    this.toString = properties.toString;
+                }
+            },
+
+            /**
+             * Creates a copy of this object.
+             *
+             * @return {Object} The clone.
+             *
+             * @example
+             *
+             *     var clone = instance.clone();
+             */
+            clone: function () {
+                return this.init.prototype.extend(this);
+            }
+        };
+    }());
+
+    /**
+     * An array of 32-bit words.
+     *
+     * @property {Array} words The array of 32-bit words.
+     * @property {number} sigBytes The number of significant bytes in this word array.
+     */
+    var WordArray = C_lib.WordArray = Base.extend({
+        /**
+         * Initializes a newly created word array.
+         *
+         * @param {Array} words (Optional) An array of 32-bit words.
+         * @param {number} sigBytes (Optional) The number of significant bytes in the words.
+         *
+         * @example
+         *
+         *     var wordArray = CryptoJS.lib.WordArray.create();
+         *     var wordArray = CryptoJS.lib.WordArray.create([0x00010203, 0x04050607]);
+         *     var wordArray = CryptoJS.lib.WordArray.create([0x00010203, 0x04050607], 6);
+         */
+        init: function (words, sigBytes) {
+            words = this.words = words || [];
+
+            if (sigBytes != undefined) {
+                this.sigBytes = sigBytes;
+            } else {
+                this.sigBytes = words.length * 4;
+            }
+        },
+
+        /**
+         * Converts this word array to a string.
+         *
+         * @param {Encoder} encoder (Optional) The encoding strategy to use. Default: CryptoJS.enc.Hex
+         *
+         * @return {string} The stringified word array.
+         *
+         * @example
+         *
+         *     var string = wordArray + '';
+         *     var string = wordArray.toString();
+         *     var string = wordArray.toString(CryptoJS.enc.Utf8);
+         */
+        toString: function (encoder) {
+            return (encoder || Hex).stringify(this);
+        },
+
+        /**
+         * Concatenates a word array to this word array.
+         *
+         * @param {WordArray} wordArray The word array to append.
+         *
+         * @return {WordArray} This word array.
+         *
+         * @example
+         *
+         *     wordArray1.concat(wordArray2);
+         */
+        concat: function (wordArray) {
+            // Shortcuts
+            var thisWords = this.words;
+            var thatWords = wordArray.words;
+            var thisSigBytes = this.sigBytes;
+            var thatSigBytes = wordArray.sigBytes;
+
+            // Clamp excess bits
+            this.clamp();
+
+            // Concat
+            if (thisSigBytes % 4) {
+                // Copy one byte at a time
+                for (var i = 0; i < thatSigBytes; i++) {
+                    var thatByte = (thatWords[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+                    thisWords[(thisSigBytes + i) >>> 2] |= thatByte << (24 - ((thisSigBytes + i) % 4) * 8);
+                }
+            } else if (thatWords.length > 0xffff) {
+                // Copy one word at a time
+                for (var i = 0; i < thatSigBytes; i += 4) {
+                    thisWords[(thisSigBytes + i) >>> 2] = thatWords[i >>> 2];
+                }
+            } else {
+                // Copy all words at once
+                thisWords.push.apply(thisWords, thatWords);
+            }
+            this.sigBytes += thatSigBytes;
+
+            // Chainable
+            return this;
+        },
+
+        /**
+         * Removes insignificant bits.
+         *
+         * @example
+         *
+         *     wordArray.clamp();
+         */
+        clamp: function () {
+            // Shortcuts
+            var words = this.words;
+            var sigBytes = this.sigBytes;
+
+            // Clamp
+            words[sigBytes >>> 2] &= 0xffffffff << (32 - (sigBytes % 4) * 8);
+            words.length = Math.ceil(sigBytes / 4);
+        },
+
+        /**
+         * Creates a copy of this word array.
+         *
+         * @return {WordArray} The clone.
+         *
+         * @example
+         *
+         *     var clone = wordArray.clone();
+         */
+        clone: function () {
+            var clone = Base.clone.call(this);
+            clone.words = this.words.slice(0);
+
+            return clone;
+        },
+
+        /**
+         * Creates a word array filled with random bytes.
+         *
+         * @param {number} nBytes The number of random bytes to generate.
+         *
+         * @return {WordArray} The random word array.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var wordArray = CryptoJS.lib.WordArray.random(16);
+         */
+        random: function (nBytes) {
+            var words = [];
+            for (var i = 0; i < nBytes; i += 4) {
+                words.push((Math.random() * 0x100000000) | 0);
+            }
+
+            return new WordArray.init(words, nBytes);
+        }
+    });
+
+    /**
+     * Encoder namespace.
+     */
+    var C_enc = C.enc = {};
+
+    /**
+     * Hex encoding strategy.
+     */
+    var Hex = C_enc.Hex = {
+        /**
+         * Converts a word array to a hex string.
+         *
+         * @param {WordArray} wordArray The word array.
+         *
+         * @return {string} The hex string.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var hexString = CryptoJS.enc.Hex.stringify(wordArray);
+         */
+        stringify: function (wordArray) {
+            // Shortcuts
+            var words = wordArray.words;
+            var sigBytes = wordArray.sigBytes;
+
+            // Convert
+            var hexChars = [];
+            for (var i = 0; i < sigBytes; i++) {
+                var bite = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+                hexChars.push((bite >>> 4).toString(16));
+                hexChars.push((bite & 0x0f).toString(16));
+            }
+
+            return hexChars.join('');
+        },
+
+        /**
+         * Converts a hex string to a word array.
+         *
+         * @param {string} hexStr The hex string.
+         *
+         * @return {WordArray} The word array.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var wordArray = CryptoJS.enc.Hex.parse(hexString);
+         */
+        parse: function (hexStr) {
+            // Shortcut
+            var hexStrLength = hexStr.length;
+
+            // Convert
+            var words = [];
+            for (var i = 0; i < hexStrLength; i += 2) {
+                words[i >>> 3] |= parseInt(hexStr.substr(i, 2), 16) << (24 - (i % 8) * 4);
+            }
+
+            return new WordArray.init(words, hexStrLength / 2);
+        }
+    };
+
+    /**
+     * Latin1 encoding strategy.
+     */
+    var Latin1 = C_enc.Latin1 = {
+        /**
+         * Converts a word array to a Latin1 string.
+         *
+         * @param {WordArray} wordArray The word array.
+         *
+         * @return {string} The Latin1 string.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var latin1String = CryptoJS.enc.Latin1.stringify(wordArray);
+         */
+        stringify: function (wordArray) {
+            // Shortcuts
+            var words = wordArray.words;
+            var sigBytes = wordArray.sigBytes;
+
+            // Convert
+            var latin1Chars = [];
+            for (var i = 0; i < sigBytes; i++) {
+                var bite = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+                latin1Chars.push(String.fromCharCode(bite));
+            }
+
+            return latin1Chars.join('');
+        },
+
+        /**
+         * Converts a Latin1 string to a word array.
+         *
+         * @param {string} latin1Str The Latin1 string.
+         *
+         * @return {WordArray} The word array.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var wordArray = CryptoJS.enc.Latin1.parse(latin1String);
+         */
+        parse: function (latin1Str) {
+            // Shortcut
+            var latin1StrLength = latin1Str.length;
+
+            // Convert
+            var words = [];
+            for (var i = 0; i < latin1StrLength; i++) {
+                words[i >>> 2] |= (latin1Str.charCodeAt(i) & 0xff) << (24 - (i % 4) * 8);
+            }
+
+            return new WordArray.init(words, latin1StrLength);
+        }
+    };
+
+    /**
+     * UTF-8 encoding strategy.
+     */
+    var Utf8 = C_enc.Utf8 = {
+        /**
+         * Converts a word array to a UTF-8 string.
+         *
+         * @param {WordArray} wordArray The word array.
+         *
+         * @return {string} The UTF-8 string.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var utf8String = CryptoJS.enc.Utf8.stringify(wordArray);
+         */
+        stringify: function (wordArray) {
+            try {
+                return decodeURIComponent(escape(Latin1.stringify(wordArray)));
+            } catch (e) {
+                throw new Error('Malformed UTF-8 data');
+            }
+        },
+
+        /**
+         * Converts a UTF-8 string to a word array.
+         *
+         * @param {string} utf8Str The UTF-8 string.
+         *
+         * @return {WordArray} The word array.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var wordArray = CryptoJS.enc.Utf8.parse(utf8String);
+         */
+        parse: function (utf8Str) {
+            return Latin1.parse(unescape(encodeURIComponent(utf8Str)));
+        }
+    };
+
+    /**
+     * Abstract buffered block algorithm template.
+     *
+     * The property blockSize must be implemented in a concrete subtype.
+     *
+     * @property {number} _minBufferSize The number of blocks that should be kept unprocessed in the buffer. Default: 0
+     */
+    var BufferedBlockAlgorithm = C_lib.BufferedBlockAlgorithm = Base.extend({
+        /**
+         * Resets this block algorithm's data buffer to its initial state.
+         *
+         * @example
+         *
+         *     bufferedBlockAlgorithm.reset();
+         */
+        reset: function () {
+            // Initial values
+            this._data = new WordArray.init();
+            this._nDataBytes = 0;
+        },
+
+        /**
+         * Adds new data to this block algorithm's buffer.
+         *
+         * @param {WordArray|string} data The data to append. Strings are converted to a WordArray using UTF-8.
+         *
+         * @example
+         *
+         *     bufferedBlockAlgorithm._append('data');
+         *     bufferedBlockAlgorithm._append(wordArray);
+         */
+        _append: function (data) {
+            // Convert string to WordArray, else assume WordArray already
+            if (typeof data == 'string') {
+                data = Utf8.parse(data);
+            }
+
+            // Append
+            this._data.concat(data);
+            this._nDataBytes += data.sigBytes;
+        },
+
+        /**
+         * Processes available data blocks.
+         *
+         * This method invokes _doProcessBlock(offset), which must be implemented by a concrete subtype.
+         *
+         * @param {boolean} doFlush Whether all blocks and partial blocks should be processed.
+         *
+         * @return {WordArray} The processed data.
+         *
+         * @example
+         *
+         *     var processedData = bufferedBlockAlgorithm._process();
+         *     var processedData = bufferedBlockAlgorithm._process(!!'flush');
+         */
+        _process: function (doFlush) {
+            // Shortcuts
+            var data = this._data;
+            var dataWords = data.words;
+            var dataSigBytes = data.sigBytes;
+            var blockSize = this.blockSize;
+            var blockSizeBytes = blockSize * 4;
+
+            // Count blocks ready
+            var nBlocksReady = dataSigBytes / blockSizeBytes;
+            if (doFlush) {
+                // Round up to include partial blocks
+                nBlocksReady = Math.ceil(nBlocksReady);
+            } else {
+                // Round down to include only full blocks,
+                // less the number of blocks that must remain in the buffer
+                nBlocksReady = Math.max((nBlocksReady | 0) - this._minBufferSize, 0);
+            }
+
+            // Count words ready
+            var nWordsReady = nBlocksReady * blockSize;
+
+            // Count bytes ready
+            var nBytesReady = Math.min(nWordsReady * 4, dataSigBytes);
+
+            // Process blocks
+            if (nWordsReady) {
+                for (var offset = 0; offset < nWordsReady; offset += blockSize) {
+                    // Perform concrete-algorithm logic
+                    this._doProcessBlock(dataWords, offset);
+                }
+
+                // Remove processed words
+                var processedWords = dataWords.splice(0, nWordsReady);
+                data.sigBytes -= nBytesReady;
+            }
+
+            // Return processed words
+            return new WordArray.init(processedWords, nBytesReady);
+        },
+
+        /**
+         * Creates a copy of this object.
+         *
+         * @return {Object} The clone.
+         *
+         * @example
+         *
+         *     var clone = bufferedBlockAlgorithm.clone();
+         */
+        clone: function () {
+            var clone = Base.clone.call(this);
+            clone._data = this._data.clone();
+
+            return clone;
+        },
+
+        _minBufferSize: 0
+    });
+
+    /**
+     * Abstract hasher template.
+     *
+     * @property {number} blockSize The number of 32-bit words this hasher operates on. Default: 16 (512 bits)
+     */
+    var Hasher = C_lib.Hasher = BufferedBlockAlgorithm.extend({
+        /**
+         * Configuration options.
+         */
+        cfg: Base.extend(),
+
+        /**
+         * Initializes a newly created hasher.
+         *
+         * @param {Object} cfg (Optional) The configuration options to use for this hash computation.
+         *
+         * @example
+         *
+         *     var hasher = CryptoJS.algo.SHA256.create();
+         */
+        init: function (cfg) {
+            // Apply config defaults
+            this.cfg = this.cfg.extend(cfg);
+
+            // Set initial values
+            this.reset();
+        },
+
+        /**
+         * Resets this hasher to its initial state.
+         *
+         * @example
+         *
+         *     hasher.reset();
+         */
+        reset: function () {
+            // Reset data buffer
+            BufferedBlockAlgorithm.reset.call(this);
+
+            // Perform concrete-hasher logic
+            this._doReset();
+        },
+
+        /**
+         * Updates this hasher with a message.
+         *
+         * @param {WordArray|string} messageUpdate The message to append.
+         *
+         * @return {Hasher} This hasher.
+         *
+         * @example
+         *
+         *     hasher.update('message');
+         *     hasher.update(wordArray);
+         */
+        update: function (messageUpdate) {
+            // Append
+            this._append(messageUpdate);
+
+            // Update the hash
+            this._process();
+
+            // Chainable
+            return this;
+        },
+
+        /**
+         * Finalizes the hash computation.
+         * Note that the finalize operation is effectively a destructive, read-once operation.
+         *
+         * @param {WordArray|string} messageUpdate (Optional) A final message update.
+         *
+         * @return {WordArray} The hash.
+         *
+         * @example
+         *
+         *     var hash = hasher.finalize();
+         *     var hash = hasher.finalize('message');
+         *     var hash = hasher.finalize(wordArray);
+         */
+        finalize: function (messageUpdate) {
+            // Final message update
+            if (messageUpdate) {
+                this._append(messageUpdate);
+            }
+
+            // Perform concrete-hasher logic
+            var hash = this._doFinalize();
+
+            return hash;
+        },
+
+        blockSize: 512/32,
+
+        /**
+         * Creates a shortcut function to a hasher's object interface.
+         *
+         * @param {Hasher} hasher The hasher to create a helper for.
+         *
+         * @return {Function} The shortcut function.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var SHA256 = CryptoJS.lib.Hasher._createHelper(CryptoJS.algo.SHA256);
+         */
+        _createHelper: function (hasher) {
+            return function (message, cfg) {
+                return new hasher.init(cfg).finalize(message);
+            };
+        },
+
+        /**
+         * Creates a shortcut function to the HMAC's object interface.
+         *
+         * @param {Hasher} hasher The hasher to use in this HMAC helper.
+         *
+         * @return {Function} The shortcut function.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var HmacSHA256 = CryptoJS.lib.Hasher._createHmacHelper(CryptoJS.algo.SHA256);
+         */
+        _createHmacHelper: function (hasher) {
+            return function (message, key) {
+                return new C_algo.HMAC.init(hasher, key).finalize(message);
+            };
+        }
+    });
+
+    /**
+     * Algorithm namespace.
+     */
+    var C_algo = C.algo = {};
+
+    return C;
+}(Math));
+
+/*
+CryptoJS v3.1.2
+code.google.com/p/crypto-js
+(c) 2009-2013 by Jeff Mott. All rights reserved.
+code.google.com/p/crypto-js/wiki/License
+*/
+(function () {
+    // Shortcuts
+    var C = CryptoJS;
+    var C_lib = C.lib;
+    var WordArray = C_lib.WordArray;
+    var C_enc = C.enc;
+
+    /**
+     * Base64 encoding strategy.
+     */
+    var Base64 = C_enc.Base64 = {
+        /**
+         * Converts a word array to a Base64 string.
+         *
+         * @param {WordArray} wordArray The word array.
+         *
+         * @return {string} The Base64 string.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var base64String = CryptoJS.enc.Base64.stringify(wordArray);
+         */
+        stringify: function (wordArray) {
+            // Shortcuts
+            var words = wordArray.words;
+            var sigBytes = wordArray.sigBytes;
+            var map = this._map;
+
+            // Clamp excess bits
+            wordArray.clamp();
+
+            // Convert
+            var base64Chars = [];
+            for (var i = 0; i < sigBytes; i += 3) {
+                var byte1 = (words[i >>> 2]       >>> (24 - (i % 4) * 8))       & 0xff;
+                var byte2 = (words[(i + 1) >>> 2] >>> (24 - ((i + 1) % 4) * 8)) & 0xff;
+                var byte3 = (words[(i + 2) >>> 2] >>> (24 - ((i + 2) % 4) * 8)) & 0xff;
+
+                var triplet = (byte1 << 16) | (byte2 << 8) | byte3;
+
+                for (var j = 0; (j < 4) && (i + j * 0.75 < sigBytes); j++) {
+                    base64Chars.push(map.charAt((triplet >>> (6 * (3 - j))) & 0x3f));
+                }
+            }
+
+            // Add padding
+            var paddingChar = map.charAt(64);
+            if (paddingChar) {
+                while (base64Chars.length % 4) {
+                    base64Chars.push(paddingChar);
+                }
+            }
+
+            return base64Chars.join('');
+        },
+
+        /**
+         * Converts a Base64 string to a word array.
+         *
+         * @param {string} base64Str The Base64 string.
+         *
+         * @return {WordArray} The word array.
+         *
+         * @static
+         *
+         * @example
+         *
+         *     var wordArray = CryptoJS.enc.Base64.parse(base64String);
+         */
+        parse: function (base64Str) {
+            // Shortcuts
+            var base64StrLength = base64Str.length;
+            var map = this._map;
+
+            // Ignore padding
+            var paddingChar = map.charAt(64);
+            if (paddingChar) {
+                var paddingIndex = base64Str.indexOf(paddingChar);
+                if (paddingIndex != -1) {
+                    base64StrLength = paddingIndex;
+                }
+            }
+
+            // Convert
+            var words = [];
+            var nBytes = 0;
+            for (var i = 0; i < base64StrLength; i++) {
+                if (i % 4) {
+                    var bits1 = map.indexOf(base64Str.charAt(i - 1)) << ((i % 4) * 2);
+                    var bits2 = map.indexOf(base64Str.charAt(i)) >>> (6 - (i % 4) * 2);
+                    words[nBytes >>> 2] |= (bits1 | bits2) << (24 - (nBytes % 4) * 8);
+                    nBytes++;
+                }
+            }
+
+            return WordArray.create(words, nBytes);
+        },
+
+        _map: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='
+    };
+}());
+
+/*
+CryptoJS v3.1.2
+code.google.com/p/crypto-js
+(c) 2009-2013 by Jeff Mott. All rights reserved.
+code.google.com/p/crypto-js/wiki/License
+*/
+(function () {
+    // Shortcuts
+    var C = CryptoJS;
+    var C_lib = C.lib;
+    var Base = C_lib.Base;
+    var C_enc = C.enc;
+    var Utf8 = C_enc.Utf8;
+    var C_algo = C.algo;
+
+    /**
+     * HMAC algorithm.
+     */
+    var HMAC = C_algo.HMAC = Base.extend({
+        /**
+         * Initializes a newly created HMAC.
+         *
+         * @param {Hasher} hasher The hash algorithm to use.
+         * @param {WordArray|string} key The secret key.
+         *
+         * @example
+         *
+         *     var hmacHasher = CryptoJS.algo.HMAC.create(CryptoJS.algo.SHA256, key);
+         */
+        init: function (hasher, key) {
+            // Init hasher
+            hasher = this._hasher = new hasher.init();
+
+            // Convert string to WordArray, else assume WordArray already
+            if (typeof key == 'string') {
+                key = Utf8.parse(key);
+            }
+
+            // Shortcuts
+            var hasherBlockSize = hasher.blockSize;
+            var hasherBlockSizeBytes = hasherBlockSize * 4;
+
+            // Allow arbitrary length keys
+            if (key.sigBytes > hasherBlockSizeBytes) {
+                key = hasher.finalize(key);
+            }
+
+            // Clamp excess bits
+            key.clamp();
+
+            // Clone key for inner and outer pads
+            var oKey = this._oKey = key.clone();
+            var iKey = this._iKey = key.clone();
+
+            // Shortcuts
+            var oKeyWords = oKey.words;
+            var iKeyWords = iKey.words;
+
+            // XOR keys with pad constants
+            for (var i = 0; i < hasherBlockSize; i++) {
+                oKeyWords[i] ^= 0x5c5c5c5c;
+                iKeyWords[i] ^= 0x36363636;
+            }
+            oKey.sigBytes = iKey.sigBytes = hasherBlockSizeBytes;
+
+            // Set initial values
+            this.reset();
+        },
+
+        /**
+         * Resets this HMAC to its initial state.
+         *
+         * @example
+         *
+         *     hmacHasher.reset();
+         */
+        reset: function () {
+            // Shortcut
+            var hasher = this._hasher;
+
+            // Reset
+            hasher.reset();
+            hasher.update(this._iKey);
+        },
+
+        /**
+         * Updates this HMAC with a message.
+         *
+         * @param {WordArray|string} messageUpdate The message to append.
+         *
+         * @return {HMAC} This HMAC instance.
+         *
+         * @example
+         *
+         *     hmacHasher.update('message');
+         *     hmacHasher.update(wordArray);
+         */
+        update: function (messageUpdate) {
+            this._hasher.update(messageUpdate);
+
+            // Chainable
+            return this;
+        },
+
+        /**
+         * Finalizes the HMAC computation.
+         * Note that the finalize operation is effectively a destructive, read-once operation.
+         *
+         * @param {WordArray|string} messageUpdate (Optional) A final message update.
+         *
+         * @return {WordArray} The HMAC.
+         *
+         * @example
+         *
+         *     var hmac = hmacHasher.finalize();
+         *     var hmac = hmacHasher.finalize('message');
+         *     var hmac = hmacHasher.finalize(wordArray);
+         */
+        finalize: function (messageUpdate) {
+            // Shortcut
+            var hasher = this._hasher;
+
+            // Compute HMAC
+            var innerHash = hasher.finalize(messageUpdate);
+            hasher.reset();
+            var hmac = hasher.finalize(this._oKey.clone().concat(innerHash));
+
+            return hmac;
+        }
+    });
+}());
+
+/*
+CryptoJS v3.1.2
+code.google.com/p/crypto-js
+(c) 2009-2013 by Jeff Mott. All rights reserved.
+code.google.com/p/crypto-js/wiki/License
+*/
+(function () {
+    // Shortcuts
+    var C = CryptoJS;
+    var C_lib = C.lib;
+    var WordArray = C_lib.WordArray;
+    var Hasher = C_lib.Hasher;
+    var C_algo = C.algo;
+
+    // Reusable object
+    var W = [];
+
+    /**
+     * SHA-1 hash algorithm.
+     */
+    var SHA1 = C_algo.SHA1 = Hasher.extend({
+        _doReset: function () {
+            this._hash = new WordArray.init([
+                0x67452301, 0xefcdab89,
+                0x98badcfe, 0x10325476,
+                0xc3d2e1f0
+            ]);
+        },
+
+        _doProcessBlock: function (M, offset) {
+            // Shortcut
+            var H = this._hash.words;
+
+            // Working variables
+            var a = H[0];
+            var b = H[1];
+            var c = H[2];
+            var d = H[3];
+            var e = H[4];
+
+            // Computation
+            for (var i = 0; i < 80; i++) {
+                if (i < 16) {
+                    W[i] = M[offset + i] | 0;
+                } else {
+                    var n = W[i - 3] ^ W[i - 8] ^ W[i - 14] ^ W[i - 16];
+                    W[i] = (n << 1) | (n >>> 31);
+                }
+
+                var t = ((a << 5) | (a >>> 27)) + e + W[i];
+                if (i < 20) {
+                    t += ((b & c) | (~b & d)) + 0x5a827999;
+                } else if (i < 40) {
+                    t += (b ^ c ^ d) + 0x6ed9eba1;
+                } else if (i < 60) {
+                    t += ((b & c) | (b & d) | (c & d)) - 0x70e44324;
+                } else /* if (i < 80) */ {
+                    t += (b ^ c ^ d) - 0x359d3e2a;
+                }
+
+                e = d;
+                d = c;
+                c = (b << 30) | (b >>> 2);
+                b = a;
+                a = t;
+            }
+
+            // Intermediate hash value
+            H[0] = (H[0] + a) | 0;
+            H[1] = (H[1] + b) | 0;
+            H[2] = (H[2] + c) | 0;
+            H[3] = (H[3] + d) | 0;
+            H[4] = (H[4] + e) | 0;
+        },
+
+        _doFinalize: function () {
+            // Shortcuts
+            var data = this._data;
+            var dataWords = data.words;
+
+            var nBitsTotal = this._nDataBytes * 8;
+            var nBitsLeft = data.sigBytes * 8;
+
+            // Add padding
+            dataWords[nBitsLeft >>> 5] |= 0x80 << (24 - nBitsLeft % 32);
+            dataWords[(((nBitsLeft + 64) >>> 9) << 4) + 14] = Math.floor(nBitsTotal / 0x100000000);
+            dataWords[(((nBitsLeft + 64) >>> 9) << 4) + 15] = nBitsTotal;
+            data.sigBytes = dataWords.length * 4;
+
+            // Hash final blocks
+            this._process();
+
+            // Return final computed hash
+            return this._hash;
+        },
+
+        clone: function () {
+            var clone = Hasher.clone.call(this);
+            clone._hash = this._hash.clone();
+
+            return clone;
+        }
+    });
+
+    /**
+     * Shortcut function to the hasher's object interface.
+     *
+     * @param {WordArray|string} message The message to hash.
+     *
+     * @return {WordArray} The hash.
+     *
+     * @static
+     *
+     * @example
+     *
+     *     var hash = CryptoJS.SHA1('message');
+     *     var hash = CryptoJS.SHA1(wordArray);
+     */
+    C.SHA1 = Hasher._createHelper(SHA1);
+
+    /**
+     * Shortcut function to the HMAC's object interface.
+     *
+     * @param {WordArray|string} message The message to hash.
+     * @param {WordArray|string} key The secret key.
+     *
+     * @return {WordArray} The HMAC.
+     *
+     * @static
+     *
+     * @example
+     *
+     *     var hmac = CryptoJS.HmacSHA1(message, key);
+     */
+    C.HmacSHA1 = Hasher._createHmacHelper(SHA1);
+}());
