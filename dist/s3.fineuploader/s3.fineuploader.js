@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 4.2.2
+* Version: 4.3.0
 *
 * Homepage: http://fineuploader.com
 *
@@ -292,17 +292,27 @@ var qq = function(element) {
         return qq.isFile(maybeFileOrInput) || qq.isInput(maybeFileOrInput);
     };
 
-    qq.isInput = function(maybeInput) {
+    qq.isInput = function(maybeInput, notFile) {
+        var evaluateType = function(type) {
+            var normalizedType = type.toLowerCase();
+
+            if (notFile) {
+                return normalizedType !== "file";
+            }
+
+            return normalizedType === "file";
+        };
+
         if (window.HTMLInputElement) {
             if (Object.prototype.toString.call(maybeInput) === "[object HTMLInputElement]") {
-                if (maybeInput.type && maybeInput.type.toLowerCase() === "file") {
+                if (maybeInput.type && evaluateType(maybeInput.type)) {
                     return true;
                 }
             }
         }
         if (maybeInput.tagName) {
             if (maybeInput.tagName.toLowerCase() === "input") {
-                if (maybeInput.type && maybeInput.type.toLowerCase() === "file") {
+                if (maybeInput.type && evaluateType(maybeInput.type)) {
                     return true;
                 }
             }
@@ -848,14 +858,14 @@ var qq = function(element) {
     "use strict";
 
     qq.Error = function(message) {
-        this.message = message;
+        this.message = "[Fine Uploader " + qq.version + "] " + message;
     };
 
     qq.Error.prototype = new Error();
 }());
 
 /*global qq */
-qq.version="4.2.2";
+qq.version="4.3.0";
 
 /* globals qq */
 qq.supportedFeatures = (function () {
@@ -1410,43 +1420,25 @@ qq.status = {
     qq.basePublicApi = {
         log: function(str, level) {
             if (this._options.debug && (!level || level === "info")) {
-                qq.log("[FineUploader " + qq.version + "] " + str);
+                qq.log("[Fine Uploader " + qq.version + "] " + str);
             }
             else if (level && level !== "info") {
-                qq.log("[FineUploader " + qq.version + "] " + str, level);
+                qq.log("[Fine Uploader " + qq.version + "] " + str, level);
 
             }
         },
 
         setParams: function(params, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.request.params = params;
-            }
-            else {
-                this._paramsStore.setParams(params, id);
-            }
+            this._paramsStore.set(params, id);
         },
 
         setDeleteFileParams: function(params, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.deleteFile.params = params;
-            }
-            else {
-                this._deleteFileParamsStore.setParams(params, id);
-            }
+            this._deleteFileParamsStore.set(params, id);
         },
 
         // Re-sets the default endpoint, an endpoint for a specific file, or an endpoint for a specific button
         setEndpoint: function(endpoint, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.request.endpoint = endpoint;
-            }
-            else {
-                this._endpointStore.setEndpoint(endpoint, id);
-            }
+            this._endpointStore.set(endpoint, id);
         },
 
         getInProgress: function() {
@@ -1524,6 +1516,9 @@ qq.status = {
 
             this._pasteHandler && this._pasteHandler.reset();
             this._options.session.refreshOnReset && this._refreshSessionData();
+
+            this._succeededSinceLastAllComplete = [];
+            this._failedSinceLastAllComplete = [];
         },
 
         addFiles: function(filesOrInputs, params, endpoint) {
@@ -1619,17 +1614,11 @@ qq.status = {
         },
 
         deleteFile: function(id) {
-            this._onSubmitDelete(id);
+            return this._onSubmitDelete(id);
         },
 
         setDeleteFileEndpoint: function(endpoint, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.deleteFile.endpoint = endpoint;
-            }
-            else {
-                this._deleteFileEndpointStore.setEndpoint(endpoint, id);
-            }
+            this._deleteFileEndpointStore.set(endpoint, id);
         },
 
         doesExist: function(fileOrBlobId) {
@@ -1732,6 +1721,26 @@ qq.status = {
      * Defines the private (internal) API for FineUploaderBasic mode.
      */
     qq.basePrivateApi = {
+        _initFormSupportAndParams: function() {
+            this._formSupport = qq.FormSupport && new qq.FormSupport(
+                this._options.form, qq.bind(this.uploadStoredFiles, this), qq.bind(this.log, this)
+            );
+
+            if (this._formSupport && this._formSupport.attachedToForm) {
+                this._paramsStore = this._createStore(
+                    this._options.request.params,  this._formSupport.getFormInputsAsObject
+                );
+
+                this._options.autoUpload = this._formSupport.newAutoUpload;
+                if (this._formSupport.newEndpoint) {
+                    this._options.request.endpoint = this._formSupport.newEndpoint;
+                }
+            }
+            else {
+                this._paramsStore = this._createStore(this._options.request.params);
+            }
+        },
+
         _uploadFile: function(id) {
             if (!this._handler.upload(id)) {
                 this._uploadData.setStatus(id, qq.status.QUEUED);
@@ -1803,10 +1812,27 @@ qq.status = {
 
             id = this._uploadData.addFile(uuid, name, size);
             this._handler.add(id, file);
+            this._trackButton(id);
 
             this._netUploadedOrQueued++;
 
             newFileWrapperList.push({id: id, file: file});
+        },
+
+        // Maps a file with the button that was used to select it.
+        _trackButton: function(id) {
+            var buttonId;
+
+            if (qq.supportedFeatures.ajaxUploading) {
+                buttonId = this._handler.getFile(id).qqButtonId;
+            }
+            else {
+                buttonId = this._getButtonId(this._handler.getInput(id));
+            }
+
+            if (buttonId) {
+                this._buttonIdsForFileIds[id] = buttonId;
+            }
         },
 
         // Creates an internal object that tracks various properties of each extra button,
@@ -2132,6 +2158,7 @@ qq.status = {
                 onStatusChange: function(id, oldStatus, newStatus) {
                     self._onUploadStatusChange(id, oldStatus, newStatus);
                     self._options.callbacks.onStatusChange(id, oldStatus, newStatus);
+                    self._maybeAllComplete(id, newStatus);
                 }
             });
         },
@@ -2201,6 +2228,41 @@ qq.status = {
             return result.success ? true : false;
         },
 
+        _maybeAllComplete: function(id, status) {
+            var self = this,
+                notFinished = this._uploadData.retrieve({
+                status: [
+                    qq.status.UPLOADING,
+                    qq.status.UPLOAD_RETRYING,
+                    qq.status.QUEUED,
+                    qq.status.SUBMITTING,
+                    qq.status.SUBMITTED,
+                    qq.status.PAUSED,
+                ]
+            }).length;
+
+            if (status === qq.status.UPLOAD_SUCCESSFUL) {
+                this._succeededSinceLastAllComplete.push(id);
+            }
+            else if (status === qq.status.UPLOAD_FAILED) {
+                this._failedSinceLastAllComplete.push(id);
+            }
+
+            if (notFinished === 0 &&
+                (this._succeededSinceLastAllComplete.length || this._failedSinceLastAllComplete.length)) {
+                // Attempt to ensure onAllComplete is not invoked before other callbacks, such as onCancel & onComplete
+                setTimeout(function() {
+                    self._options.callbacks.onAllComplete(
+                        qq.extend([], self._succeededSinceLastAllComplete),
+                        qq.extend([], self._failedSinceLastAllComplete)
+                    );
+
+                    self._succeededSinceLastAllComplete = [];
+                    self._failedSinceLastAllComplete = [];
+                }, 0);
+            }
+        },
+
         _onCancel: function(id, name) {
             this._netUploadedOrQueued--;
 
@@ -2243,13 +2305,14 @@ qq.status = {
             }
 
             if (this._isDeletePossible()) {
-                return this._handleCheckedCallback({
+                this._handleCheckedCallback({
                     name: "onSubmitDelete",
                     callback: qq.bind(this._options.callbacks.onSubmitDelete, this, id),
                     onSuccess: adjustedOnSuccessCallback ||
                         qq.bind(this._deleteHandler.sendDelete, this, id, uuid, additionalMandatedParams),
                     identifier: id
                 });
+                return true;
             }
             else {
                 this.log("Delete request ignored for ID " + id + ", delete feature is disabled or request not possible " +
@@ -2445,6 +2508,11 @@ qq.status = {
         },
 
         _prepareItemsForUpload: function(items, params, endpoint) {
+            if (items.length === 0) {
+                this._itemError("noFilesError");
+                return;
+            }
+
             var validationDescriptors = this._getValidationDescriptors(items),
                 buttonId = this._getButtonId(items[0].file),
                 button = this._getButton(buttonId);
@@ -2479,19 +2547,6 @@ qq.status = {
         },
 
         _onSubmitCallbackSuccess: function(id, name) {
-            var buttonId;
-
-            if (qq.supportedFeatures.ajaxUploading) {
-                buttonId = this._handler.getFile(id).qqButtonId;
-            }
-            else {
-                buttonId = this._getButtonId(this._handler.getInput(id));
-            }
-
-            if (buttonId) {
-                this._buttonIdsForFileIds[id] = buttonId;
-            }
-
             this._onSubmit.apply(this, arguments);
             this._uploadData.setStatus(id, qq.status.SUBMITTED);
             this._onSubmitted.apply(this, arguments);
@@ -2842,65 +2897,62 @@ qq.status = {
             return fileDescriptors;
         },
 
-        _createParamsStore: function(type) {
-            var paramsStore = {},
-                self = this;
+        _createStore: function(initialValue, readOnlyValues) {
+            var store = {},
+                catchall = initialValue,
+                copy = function(orig) {
+                    if (qq.isObject(orig)) {
+                        return qq.extend({}, orig);
+                    }
+                    return orig;
+                },
+                getReadOnlyValues = function() {
+                    if (qq.isFunction(readOnlyValues)) {
+                        return readOnlyValues();
+                    }
+                    return readOnlyValues;
+                },
+                includeReadOnlyValues = function(existing) {
+                    if (readOnlyValues && qq.isObject(existing)) {
+                        qq.extend(existing, getReadOnlyValues());
+                    }
+                };
 
             return {
-                setParams: function(params, id) {
-                    var paramsCopy = {};
-                    qq.extend(paramsCopy, params);
-                    paramsStore[id] = paramsCopy;
-                },
-
-                getParams: function(id) {
+                set: function(val, id) {
                     /*jshint eqeqeq: true, eqnull: true*/
-                    var paramsCopy = {};
-
-                    if (id != null && paramsStore[id]) {
-                        qq.extend(paramsCopy, paramsStore[id]);
+                    if (id == null) {
+                        store = {};
+                        catchall = copy(val);
                     }
                     else {
-                        qq.extend(paramsCopy, self._options[type].params);
+                        store[id] = copy(val);
                     }
-
-                    return paramsCopy;
                 },
 
-                remove: function(fileId) {
-                    return delete paramsStore[fileId];
-                },
+                get: function(id) {
+                    var values;
 
-                reset: function() {
-                    paramsStore = {};
-                }
-            };
-        },
-
-        _createEndpointStore: function(type) {
-            var endpointStore = {},
-            self = this;
-
-            return {
-                setEndpoint: function(endpoint, id) {
-                    endpointStore[id] = endpoint;
-                },
-
-                getEndpoint: function(id) {
                     /*jshint eqeqeq: true, eqnull: true*/
-                    if (id != null && endpointStore[id]) {
-                        return endpointStore[id];
+                    if (id != null && store[id]) {
+                        values = store[id];
+                    }
+                    else {
+                        values = catchall;
                     }
 
-                    return self._options[type].endpoint;
+                    includeReadOnlyValues(values);
+
+                    return copy(values);
                 },
 
                 remove: function(fileId) {
-                    return delete endpointStore[fileId];
+                    return delete store[fileId];
                 },
 
                 reset: function() {
-                    endpointStore = {};
+                    store = {};
+                    catchall = initialValue;
                 }
             };
         },
@@ -2947,7 +2999,6 @@ qq.status = {
             var extraButtonSpec = this._extraButtonSpecs[buttonId];
 
             return extraButtonSpec ? extraButtonSpec.validation : this._options.validation;
-
         }
     };
 }());
@@ -2997,6 +3048,7 @@ qq.status = {
                 onSubmit: function(id, name){},
                 onSubmitted: function(id, name){},
                 onComplete: function(id, name, responseJSON, maybeXhr){},
+                onAllComplete: function(successful, failed) {},
                 onCancel: function(id, name){},
                 onUpload: function(id, name){},
                 onUploadChunk: function(id, name, chunkData){},
@@ -3121,6 +3173,18 @@ qq.status = {
                 params: {},
                 customHeaders: {},
                 refreshOnReset: true
+            },
+
+            // Send parameters associated with an existing form along with the files
+            form: {
+                // Element ID, HTMLElement, or null
+                element: "qq-form",
+
+                // Overrides the base `autoUpload`, unless `element` is null.
+                autoUpload: false,
+
+                // true = upload files on form submission (and squelch submit event)
+                interceptSubmit: true
             }
         };
 
@@ -3144,11 +3208,12 @@ qq.status = {
         this._netUploaded = 0;
         this._uploadData = this._createUploadDataTracker();
 
-        this._paramsStore = this._createParamsStore("request");
-        this._deleteFileParamsStore = this._createParamsStore("deleteFile");
+        this._initFormSupportAndParams();
 
-        this._endpointStore = this._createEndpointStore("request");
-        this._deleteFileEndpointStore = this._createEndpointStore("deleteFile");
+        this._deleteFileParamsStore = this._createStore(this._options.deleteFile.params);
+
+        this._endpointStore = this._createStore(this._options.request.endpoint);
+        this._deleteFileEndpointStore = this._createStore(this._options.deleteFile.endpoint);
 
         this._handler = this._createUploadHandler();
 
@@ -3175,6 +3240,9 @@ qq.status = {
 
         this._imageGenerator = qq.ImageGenerator && new qq.ImageGenerator(qq.bind(this.log, this));
         this._refreshSessionData();
+
+        this._succeededSinceLastAllComplete = [];
+        this._failedSinceLastAllComplete = [];
     };
 
     // Define the private & public API methods.
@@ -3189,7 +3257,7 @@ qq.AjaxRequester = function (o) {
 
     var log, shouldParamsBeInQueryString,
         queue = [],
-        requestData = [],
+        requestData = {},
         options = {
             validMethods: ["POST"],
             method: "POST",
@@ -3211,7 +3279,8 @@ qq.AjaxRequester = function (o) {
             },
             log: function (str, level) {},
             onSend: function (id) {},
-            onComplete: function (id, xhrOrXdr, isError) {}
+            onComplete: function (id, xhrOrXdr, isError) {},
+            onProgress: null
         };
 
     qq.extend(options, o);
@@ -3320,8 +3389,8 @@ qq.AjaxRequester = function (o) {
             mandatedParams = options.mandatedParams,
             params;
 
-        if (options.paramsStore.getParams) {
-            params = options.paramsStore.getParams(id);
+        if (options.paramsStore.get) {
+            params = options.paramsStore.get(id);
         }
 
         if (onDemandParams) {
@@ -3361,6 +3430,9 @@ qq.AjaxRequester = function (o) {
             xhr.onreadystatechange = getXhrReadyStateChangeHandler(id);
         }
 
+
+        registerForUploadProgress(id);
+
         // The last parameter is assumed to be ignored if we are actually using `XDomainRequest`.
         xhr.open(method, url, true);
 
@@ -3380,19 +3452,21 @@ qq.AjaxRequester = function (o) {
         else if (shouldParamsBeInQueryString || !params) {
             xhr.send();
         }
-        else if (params && options.contentType.toLowerCase().indexOf("application/x-www-form-urlencoded") >= 0) {
+        else if (params && options.contentType && options.contentType.toLowerCase().indexOf("application/x-www-form-urlencoded") >= 0) {
             xhr.send(qq.obj2url(params, ""));
         }
-        else if (params && options.contentType.toLowerCase().indexOf("application/json") >= 0) {
+        else if (params && options.contentType && options.contentType.toLowerCase().indexOf("application/json") >= 0) {
             xhr.send(JSON.stringify(params));
         }
         else {
             xhr.send(params);
         }
+
+        return xhr;
     }
 
     function createUrl(id, params) {
-        var endpoint = options.endpointStore.getEndpoint(id),
+        var endpoint = options.endpointStore.get(id),
             addToPath = requestData[id].addToPath;
 
         /*jshint -W116,-W041 */
@@ -3416,6 +3490,18 @@ qq.AjaxRequester = function (o) {
                 onComplete(id);
             }
         };
+    }
+
+    function registerForUploadProgress(id) {
+        var onProgress = options.onProgress;
+
+        if (onProgress) {
+            getXhrOrXdr(id).upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    onProgress(id, e.loaded, e.total);
+                }
+            };
+        }
     }
 
     // This will be called by IE to indicate **success** for an associated
@@ -3459,7 +3545,7 @@ qq.AjaxRequester = function (o) {
                 xhr.setRequestHeader("Content-Type", options.contentType);
             }
 
-            qq.extend(allHeaders, customHeaders);
+            qq.extend(allHeaders, qq.isFunction(customHeaders) ? customHeaders(id) : customHeaders);
             qq.extend(allHeaders, onDemandHeaders);
 
             qq.each(allHeaders, function (name, val) {
@@ -3484,7 +3570,7 @@ qq.AjaxRequester = function (o) {
 
         // if too many active connections, wait...
         if (len <= options.maxConnections) {
-            sendRequest(id);
+            return sendRequest(id);
         }
     }
 
@@ -3494,7 +3580,7 @@ qq.AjaxRequester = function (o) {
     qq.extend(this, {
         // Start the process of sending the request.  The ID refers to the file associated with the request.
         initTransport: function(id) {
-            var path, params, headers, payload;
+            var path, params, headers, payload, cacheBuster;
 
             return {
                 // Optionally specify the end of the endpoint path for the request.
@@ -3524,11 +3610,25 @@ qq.AjaxRequester = function (o) {
                     return this;
                 },
 
+                // Appends a cache buster (timestamp) to the request URL as a query parameter (only if GET or DELETE)
+                withCacheBuster: function() {
+                    cacheBuster = true;
+                    return this;
+                },
+
                 // Send the constructed request.
                 send: function() {
-                    prepareToSend(id, path, params, headers, payload);
+                    if (cacheBuster && qq.indexOf(["GET", "DELETE"], options.method) >= 0) {
+                        params.qqtimestamp = new Date().getTime();
+                    }
+
+                    return prepareToSend(id, path, params, headers, payload);
                 }
             };
+        },
+
+        canceled: function(id) {
+            dequeue(id);
         }
     });
 };
@@ -3772,22 +3872,21 @@ qq.UploadHandler = function(o, namespace) {
  * Common APIs exposed to creators of upload via form/iframe handlers.  This is reused and possibly overridden
  * in some cases by specific form upload handlers.
  *
- * @param internalApi Object that will be filled with internal API methods
- * @param spec Options/static values used to configure this handler
- * @param proxy Callbacks & methods used to query for or push out data/changes
  * @constructor
  */
-qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
+qq.AbstractUploadHandlerForm = function(spec) {
     "use strict";
 
-    var formHandlerInstanceId = qq.getUniqueId(),
+    var options = spec.options,
+        handler = this,
+        proxy = spec.proxy,
+        formHandlerInstanceId = qq.getUniqueId(),
         onloadCallbacks = {},
         detachLoadEvents = {},
         postMessageCallbackTimers = {},
-        publicApi = this,
-        isCors = spec.isCors,
-        fileState = spec.fileState,
-        inputName = spec.inputName,
+        isCors = options.isCors,
+        fileState = {},
+        inputName = options.inputName,
         onCancel = proxy.onCancel,
         onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
@@ -3814,7 +3913,7 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
             corsMessageReceiver.stopReceivingMessages(id);
         }
 
-        var iframe = document.getElementById(internalApi.getIframeName(id));
+        var iframe = document.getElementById(handler._getIframeName(id));
         if (iframe) {
             // To cancel request set src to something else.  We use src="javascript:false;"
             // because it doesn't trigger ie6 prompt on https
@@ -3859,7 +3958,7 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
         corsMessageReceiver.receiveMessage(iframeName, function(message) {
             log("Received the following window message: '" + message + "'");
             var fileId = getFileIdForIframeName(iframeName),
-                response = internalApi.parseJsonResponse(fileId, message),
+                response = handler._parseJsonResponse(fileId, message),
                 uuid = response.uuid,
                 onloadCallback;
 
@@ -3868,7 +3967,7 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
                 clearTimeout(postMessageCallbackTimers[iframeName]);
                 delete postMessageCallbackTimers[iframeName];
 
-                internalApi.detachLoadEvent(iframeName);
+                handler._detachLoadEvent(iframeName);
 
                 onloadCallback = onloadCallbacks[uuid];
 
@@ -3908,150 +4007,6 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
         return iframeName.split("_")[0];
     }
 
-
-// INTERNAL API
-
-    qq.extend(internalApi, {
-        /**
-         * @param fileId ID of the associated file
-         * @returns {string} The `document`-unique name of the iframe
-         */
-        getIframeName: function(fileId) {
-            return fileId + "_" + formHandlerInstanceId;
-        },
-
-        /**
-         * Creates an iframe with a specific document-unique name.
-         *
-         * @param id ID of the associated file
-         * @returns {HTMLIFrameElement}
-         */
-        createIframe: function(id) {
-            var iframeName = internalApi.getIframeName(id);
-
-            return initIframeForUpload(iframeName);
-        },
-
-        /**
-         * @param id ID of the associated file
-         * @param innerHtmlOrMessage JSON message
-         * @returns {*} The parsed response, or an empty object if the response could not be parsed
-         */
-        parseJsonResponse: function(id, innerHtmlOrMessage) {
-            var response;
-
-            try {
-                response = qq.parseJson(innerHtmlOrMessage);
-
-                if (response.newUuid !== undefined) {
-                    onUuidChanged(id, response.newUuid);
-                }
-            }
-            catch(error) {
-                log("Error when attempting to parse iframe upload response (" + error.message + ")", "error");
-                response = {};
-            }
-
-            return response;
-        },
-
-        /**
-         * Generates a form element and appends it to the `document`.  When the form is submitted, a specific iframe is targeted.
-         * The name of the iframe is passed in as a property of the spec parameter, and must be unique in the `document`.  Note
-         * that the form is hidden from view.
-         *
-         * @param spec An object containing various properties to be used when constructing the form.  Required properties are
-         * currently: `method`, `endpoint`, `params`, `paramsInBody`, and `targetName`.
-         * @returns {HTMLFormElement} The created form
-         */
-        initFormForUpload: function(spec) {
-            var method = spec.method,
-                endpoint = spec.endpoint,
-                params = spec.params,
-                paramsInBody = spec.paramsInBody,
-                targetName = spec.targetName,
-                form = qq.toElement("<form method='" + method + "' enctype='multipart/form-data'></form>"),
-                url = endpoint;
-
-            if (paramsInBody) {
-                qq.obj2Inputs(params, form);
-            }
-            else {
-                url = qq.obj2url(params, endpoint);
-            }
-
-            form.setAttribute("action", url);
-            form.setAttribute("target", targetName);
-            form.style.display = "none";
-            document.body.appendChild(form);
-
-            return form;
-        },
-
-        /**
-         * This function either delegates to a more specific message handler if CORS is involved,
-         * or simply registers a callback when the iframe has been loaded that invokes the passed callback
-         * after determining if the content of the iframe is accessible.
-         *
-         * @param iframe Associated iframe
-         * @param callback Callback to invoke after we have determined if the iframe content is accessible.
-         */
-        attachLoadEvent: function(iframe, callback) {
-            /*jslint eqeq: true*/
-            var responseDescriptor;
-
-            if (isCors) {
-                registerPostMessageCallback(iframe, callback);
-            }
-            else {
-                detachLoadEvents[iframe.id] = qq(iframe).attach("load", function(){
-                    log("Received response for " + iframe.id);
-
-                    // when we remove iframe from dom
-                    // the request stops, but in IE load
-                    // event fires
-                    if (!iframe.parentNode){
-                        return;
-                    }
-
-                    try {
-                        // fixing Opera 10.53
-                        if (iframe.contentDocument &&
-                            iframe.contentDocument.body &&
-                            iframe.contentDocument.body.innerHTML == "false"){
-                            // In Opera event is fired second time
-                            // when body.innerHTML changed from false
-                            // to server response approx. after 1 sec
-                            // when we upload file with iframe
-                            return;
-                        }
-                    }
-                    catch (error) {
-                        //IE may throw an "access is denied" error when attempting to access contentDocument on the iframe in some cases
-                        log("Error when attempting to access iframe during handling of upload response (" + error.message + ")", "error");
-                        responseDescriptor = {success: false};
-                    }
-
-                    callback(responseDescriptor);
-                });
-            }
-        },
-
-        /**
-         * Called when we are no longer interested in being notified when an iframe has loaded.
-         *
-         * @param id Associated file ID
-         */
-        detachLoadEvent: function(id) {
-            if (detachLoadEvents[id] !== undefined) {
-                detachLoadEvents[id]();
-                delete detachLoadEvents[id];
-            }
-        }
-    });
-
-
-// PUBLIC API
 
     qq.extend(this, {
         add: function(id, fileInput) {
@@ -4100,6 +4055,147 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
 
         upload: function(id) {
             // implementation-specific
+        },
+
+        /**
+         * @param fileId ID of the associated file
+         * @returns {string} The `document`-unique name of the iframe
+         */
+        _getIframeName: function(fileId) {
+            return fileId + "_" + formHandlerInstanceId;
+        },
+
+        /**
+         * Creates an iframe with a specific document-unique name.
+         *
+         * @param id ID of the associated file
+         * @returns {HTMLIFrameElement}
+         */
+        _createIframe: function(id) {
+            var iframeName = handler._getIframeName(id);
+
+            return initIframeForUpload(iframeName);
+        },
+
+        /**
+         * @param id ID of the associated file
+         * @param innerHtmlOrMessage JSON message
+         * @returns {*} The parsed response, or an empty object if the response could not be parsed
+         */
+        _parseJsonResponse: function(id, innerHtmlOrMessage) {
+            var response;
+
+            try {
+                response = qq.parseJson(innerHtmlOrMessage);
+
+                if (response.newUuid !== undefined) {
+                    onUuidChanged(id, response.newUuid);
+                }
+            }
+            catch(error) {
+                log("Error when attempting to parse iframe upload response (" + error.message + ")", "error");
+                response = {};
+            }
+
+            return response;
+        },
+
+        /**
+         * Generates a form element and appends it to the `document`.  When the form is submitted, a specific iframe is targeted.
+         * The name of the iframe is passed in as a property of the spec parameter, and must be unique in the `document`.  Note
+         * that the form is hidden from view.
+         *
+         * @param spec An object containing various properties to be used when constructing the form.  Required properties are
+         * currently: `method`, `endpoint`, `params`, `paramsInBody`, and `targetName`.
+         * @returns {HTMLFormElement} The created form
+         */
+        _initFormForUpload: function(spec) {
+            var method = spec.method,
+                endpoint = spec.endpoint,
+                params = spec.params,
+                paramsInBody = spec.paramsInBody,
+                targetName = spec.targetName,
+                form = qq.toElement("<form method='" + method + "' enctype='multipart/form-data'></form>"),
+                url = endpoint;
+
+            if (paramsInBody) {
+                qq.obj2Inputs(params, form);
+            }
+            else {
+                url = qq.obj2url(params, endpoint);
+            }
+
+            form.setAttribute("action", url);
+            form.setAttribute("target", targetName);
+            form.style.display = "none";
+            document.body.appendChild(form);
+
+            return form;
+        },
+
+        /**
+         * This function either delegates to a more specific message handler if CORS is involved,
+         * or simply registers a callback when the iframe has been loaded that invokes the passed callback
+         * after determining if the content of the iframe is accessible.
+         *
+         * @param iframe Associated iframe
+         * @param callback Callback to invoke after we have determined if the iframe content is accessible.
+         */
+        _attachLoadEvent: function(iframe, callback) {
+            /*jslint eqeq: true*/
+            var responseDescriptor;
+
+            if (isCors) {
+                registerPostMessageCallback(iframe, callback);
+            }
+            else {
+                detachLoadEvents[iframe.id] = qq(iframe).attach("load", function(){
+                    log("Received response for " + iframe.id);
+
+                    // when we remove iframe from dom
+                    // the request stops, but in IE load
+                    // event fires
+                    if (!iframe.parentNode){
+                        return;
+                    }
+
+                    try {
+                        // fixing Opera 10.53
+                        if (iframe.contentDocument &&
+                            iframe.contentDocument.body &&
+                            iframe.contentDocument.body.innerHTML == "false"){
+                            // In Opera event is fired second time
+                            // when body.innerHTML changed from false
+                            // to server response approx. after 1 sec
+                            // when we upload file with iframe
+                            return;
+                        }
+                    }
+                    catch (error) {
+                        //IE may throw an "access is denied" error when attempting to access contentDocument on the iframe in some cases
+                        log("Error when attempting to access iframe during handling of upload response (" + error.message + ")", "error");
+                        responseDescriptor = {success: false};
+                    }
+
+                    callback(responseDescriptor);
+                });
+            }
+        },
+
+        /**
+         * Called when we are no longer interested in being notified when an iframe has loaded.
+         *
+         * @param id Associated file ID
+         */
+        _detachLoadEvent: function(id) {
+            if (detachLoadEvents[id] !== undefined) {
+                detachLoadEvents[id]();
+                delete detachLoadEvents[id];
+            }
+        },
+
+        _getFileState: function(id) {
+            return fileState[id];
         }
     });
 };
@@ -4109,20 +4205,18 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
  * Common API exposed to creators of XHR handlers.  This is reused and possibly overriding in some cases by specific
  * XHR upload handlers.
  *
- * @param internalApi Object that will be filled with internal API methods
- * @param spec Options/static values used to configure this handler
- * @param proxy Callbacks & methods used to query for or push out data/changes
  * @constructor
  */
-qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
+qq.AbstractUploadHandlerXhr = function(spec) {
     "use strict";
 
     var publicApi = this,
-        fileState = spec.fileState,
-        chunking = spec.chunking,
+        options = spec.options,
+        proxy = spec.proxy,
+        fileState = {},
+        chunking = options.chunking,
         onUpload = proxy.onUpload,
         onCancel = proxy.onCancel,
-        onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
         getSize = proxy.getSize,
         log = proxy.log;
@@ -4140,61 +4234,15 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
         }
     }
 
-    qq.extend(internalApi, {
-        /**
-         * Creates an XHR instance for this file and stores it in the fileState.
-         *
-         * @param id File ID
-         * @returns {XMLHttpRequest}
-         */
-        createXhr: function(id) {
-            var xhr = qq.createXhrInstance();
+    function abort(id) {
+        var xhr = fileState[id].xhr,
+            ajaxRequester = fileState[id].currentAjaxRequester;
 
-            fileState[id].xhr = xhr;
-
-            return xhr;
-        },
-
-        /**
-         * @param id ID of the associated file
-         * @returns {number} Number of parts this file can be divided into, or undefined if chunking is not supported in this UA
-         */
-        getTotalChunks: function(id) {
-            if (chunking) {
-                var fileSize = getSize(id),
-                    chunkSize = chunking.partSize;
-
-                return Math.ceil(fileSize / chunkSize);
-            }
-        },
-
-        getChunkData: function(id, chunkIndex) {
-            var chunkSize = chunking.partSize,
-                fileSize = getSize(id),
-                fileOrBlob = publicApi.getFile(id),
-                startBytes = chunkSize * chunkIndex,
-                endBytes = startBytes+chunkSize >= fileSize ? fileSize : startBytes+chunkSize,
-                totalChunks = internalApi.getTotalChunks(id);
-
-            return {
-                part: chunkIndex,
-                start: startBytes,
-                end: endBytes,
-                count: totalChunks,
-                blob: getChunk(fileOrBlob, startBytes, endBytes),
-                size: endBytes - startBytes
-            };
-        },
-
-        getChunkDataForCallback: function(chunkData) {
-            return {
-                partIndex: chunkData.part,
-                startByte: chunkData.start + 1,
-                endByte: chunkData.end,
-                totalParts: chunkData.count
-            };
-        }
-    });
+        xhr.onreadystatechange = null;
+        xhr.upload.onprogress = null;
+        xhr.abort();
+        ajaxRequester && ajaxRequester.canceled && ajaxRequester.canceled(id);
+    }
 
     qq.extend(this, {
         /**
@@ -4229,10 +4277,7 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
         expunge: function(id) {
             var xhr = fileState[id].xhr;
 
-            if (xhr) {
-                xhr.onreadystatechange = null;
-                xhr.abort();
-            }
+            xhr && abort(id);
 
             delete fileState[id];
         },
@@ -4250,10 +4295,12 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
 
             if (onCancelRetVal instanceof qq.Promise) {
                 return onCancelRetVal.then(function() {
+                    fileState[id].canceled = true;
                     this.expunge(id);
                 });
             }
             else if (onCancelRetVal !== false) {
+                fileState[id].canceled = true;
                 this.expunge(id);
                 return true;
             }
@@ -4267,9 +4314,80 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
             if(xhr) {
                 log(qq.format("Aborting XHR upload for {} '{}' due to pause instruction.", id, getName(id)));
                 fileState[id].paused = true;
-                xhr.abort();
+                abort(id);
                 return true;
             }
+        },
+
+        /**
+         * Creates an XHR instance for this file and stores it in the fileState.
+         *
+         * @param id File ID
+         * @returns {XMLHttpRequest}
+         */
+        _createXhr: function(id) {
+            return this._registerXhr(id, qq.createXhrInstance());
+        },
+
+        /**
+         * Registers an XHR transport instance created elsewhere.
+         *
+         * @param id ID of the associated file
+         * @param xhr XMLHttpRequest object instance
+         * @returns {XMLHttpRequest}
+         */
+        _registerXhr: function(id, xhr, ajaxRequester) {
+            fileState[id].xhr = xhr;
+            fileState[id].currentAjaxRequester = ajaxRequester;
+            return xhr;
+        },
+
+        _getMimeType: function(id) {
+            return publicApi.getFile(id).type;
+        },
+
+        /**
+         * @param id ID of the associated file
+         * @returns {number} Number of parts this file can be divided into, or undefined if chunking is not supported in this UA
+         */
+        _getTotalChunks: function(id) {
+            if (chunking) {
+                var fileSize = getSize(id),
+                    chunkSize = chunking.partSize;
+
+                return Math.ceil(fileSize / chunkSize);
+            }
+        },
+
+        _getChunkData: function(id, chunkIndex) {
+            var chunkSize = chunking.partSize,
+                fileSize = getSize(id),
+                fileOrBlob = publicApi.getFile(id),
+                startBytes = chunkSize * chunkIndex,
+                endBytes = startBytes+chunkSize >= fileSize ? fileSize : startBytes+chunkSize,
+                totalChunks = this._getTotalChunks(id);
+
+            return {
+                part: chunkIndex,
+                start: startBytes,
+                end: endBytes,
+                count: totalChunks,
+                blob: getChunk(fileOrBlob, startBytes, endBytes),
+                size: endBytes - startBytes
+            };
+        },
+
+        _getChunkDataForCallback: function(chunkData) {
+            return {
+                partIndex: chunkData.part,
+                startByte: chunkData.start + 1,
+                endByte: chunkData.end,
+                totalParts: chunkData.count
+            };
+        },
+
+        _getFileState: function(id) {
+            return fileState[id];
         }
     });
 };
@@ -4445,7 +4563,7 @@ qq.WindowReceiveMessage = function(o) {
                             file.qqDropTarget = targetEl;
                         });
 
-                        if (files) {
+                        if (files.length) {
                             self.addFiles(files, null, null);
                         }
                     },
@@ -5862,9 +5980,14 @@ qq.s3.util = qq.s3.util || (function() {
 
     return {
         AWS_PARAM_PREFIX: "x-amz-meta-",
+
         SESSION_TOKEN_PARAM_NAME: "x-amz-security-token",
+
         REDUCED_REDUNDANCY_PARAM_NAME: "x-amz-storage-class",
         REDUCED_REDUNDANCY_PARAM_VALUE: "REDUCED_REDUNDANCY",
+
+        SERVER_SIDE_ENCRYPTION_PARAM_NAME: "x-amz-server-side-encryption",
+        SERVER_SIDE_ENCRYPTION_PARAM_VALUE: "AES256",
 
         /**
          * This allows for the region to be specified in the bucket's endpoint URL, or not.
@@ -5924,7 +6047,8 @@ qq.s3.util = qq.s3.util || (function() {
                 successRedirectUrl = qq.s3.util.getSuccessRedirectAbsoluteUrl(spec.successRedirectUrl),
                 minFileSize = spec.minFileSize,
                 maxFileSize = spec.maxFileSize,
-                reducedRedundancy = spec.reducedRedundancy;
+                reducedRedundancy = spec.reducedRedundancy,
+                serverSideEncryption = spec.serverSideEncryption;
 
             policy.expiration = qq.s3.util.getPolicyExpirationDate(expirationDate);
 
@@ -5951,6 +6075,11 @@ qq.s3.util = qq.s3.util || (function() {
             if (sessionToken) {
                 conditions.push({});
                 conditions[conditions.length - 1][qq.s3.util.SESSION_TOKEN_PARAM_NAME] = sessionToken;
+            }
+
+            if (serverSideEncryption) {
+                conditions.push({});
+                conditions[conditions.length - 1][qq.s3.util.SERVER_SIDE_ENCRYPTION_PARAM_NAME] = qq.s3.util.SERVER_SIDE_ENCRYPTION_PARAM_VALUE;
             }
 
             conditions.push({key: key});
@@ -6004,7 +6133,7 @@ qq.s3.util = qq.s3.util || (function() {
          * before it is sent to the server for signing.
          *
          * @param spec Object with properties: `params`, `type`, `key`, `accessKey`, `acl`, `expectedStatus`, `successRedirectUrl`,
-         * `reducedRedundancy`, and `log()`, along with any options associated with `qq.s3.util.getPolicy()`.
+         * `reducedRedundancy`, serverSideEncryption, and `log()`, along with any options associated with `qq.s3.util.getPolicy()`.
          * @returns {qq.Promise} Promise that will be fulfilled once all parameters have been determined.
          */
         generateAwsParams: function(spec, signPolicyCallback) {
@@ -6020,6 +6149,7 @@ qq.s3.util = qq.s3.util || (function() {
                 expectedStatus = spec.expectedStatus,
                 successRedirectUrl = qq.s3.util.getSuccessRedirectAbsoluteUrl(spec.successRedirectUrl),
                 reducedRedundancy = spec.reducedRedundancy,
+                serverSideEncryption = spec.serverSideEncryption,
                 log = spec.log;
 
             awsParams.key = key;
@@ -6039,6 +6169,10 @@ qq.s3.util = qq.s3.util || (function() {
 
             if (reducedRedundancy) {
                 awsParams[qq.s3.util.REDUCED_REDUNDANCY_PARAM_NAME] = qq.s3.util.REDUCED_REDUNDANCY_PARAM_VALUE;
+            }
+
+            if (serverSideEncryption) {
+                awsParams[qq.s3.util.SERVER_SIDE_ENCRYPTION_PARAM_NAME] = qq.s3.util.SERVER_SIDE_ENCRYPTION_PARAM_VALUE;
             }
 
             if (sessionToken) {
@@ -6147,7 +6281,7 @@ qq.s3.util = qq.s3.util || (function() {
                 return {
                     bucket: match[1],
                     key: match[2],
-                    etag: match[3]
+                    etag: match[3].replace(/%22/g, "")
                 };
             }
         },
@@ -6200,6 +6334,320 @@ qq.s3.util = qq.s3.util || (function() {
     };
 }());
 
+/* globals qq */
+/**
+ * TODO
+ * @constructor
+ */
+qq.AbstractNonTraditionalUploadHandlerXhr = function(spec) {
+    "use strict";
+
+    var handler = this,
+        options = spec.options,
+        proxy = spec.proxy,
+        chunking = options.chunking,
+        resume = options.resume,
+        namespace = options.namespace,
+        onUuidChanged = proxy.onUuidChanged,
+        resumeEnabled = options.resumeEnabled,
+        getEndpoint = proxy.getEndpoint,
+        getName = proxy.getName,
+        getSize = proxy.getSize,
+        getUuid = proxy.getUuid,
+        log = proxy.log,
+        baseHandlerXhrApi = new qq.AbstractUploadHandlerXhr(spec);
+
+    qq.extend(this, baseHandlerXhrApi);
+    qq.extend(this, {
+        getResumableFilesData: function() {
+            return handler._getResumableFilesData();
+        },
+
+        getThirdPartyFileId: function(id) {
+            return handler._getFileState(id).key;
+        },
+
+        /**
+         * Determine if the associated file should be chunked.
+         *
+         * @param id ID of the associated file
+         * @returns {*} true if chunking is enabled, possible, and the file can be split into more than 1 part
+         */
+        _shouldChunkThisFile: function(id) {
+            var totalChunks,
+                fileState = handler._getFileState(id);
+
+            if (!fileState.chunking) {
+                fileState.chunking = {};
+                totalChunks = handler._getTotalChunks(id);
+                if (totalChunks > 1) {
+                    fileState.chunking.enabled = true;
+                    fileState.chunking.parts = totalChunks;
+                }
+                else {
+                    fileState.chunking.enabled = false;
+                }
+            }
+
+            return fileState.chunking.enabled;
+        },
+
+        // If this is a resumable upload, grab the relevant data from storage and items in memory that track this upload
+        // so we can pick up from where we left off.
+        _maybePrepareForResume: function(id) {
+            var fileState = handler._getFileState(id),
+                localStorageId, persistedData;
+
+            // Resume is enabled and possible and this is the first time we've tried to upload this file in this session,
+            // so prepare for a resume attempt.
+            if (resumeEnabled && fileState.key === undefined) {
+                localStorageId = handler._getLocalStorageId(id);
+                persistedData = localStorage.getItem(localStorageId);
+
+                // If we haven't found this item in local storage, give up
+                if (persistedData) {
+                    log(qq.format("Identified file with ID {} and name of {} as resumable.", id, getName(id)));
+
+                    persistedData = JSON.parse(persistedData);
+
+                    onUuidChanged(id, persistedData.uuid);
+                    fileState.key = persistedData.key;
+                    fileState.loaded = persistedData.loaded;
+                    fileState.chunking = persistedData.chunking;
+                }
+            }
+        },
+
+        // Persist any data needed to resume this upload in a new session.
+        _maybePersistChunkedState: function(id) {
+            var fileState = handler._getFileState(id),
+                localStorageId, persistedData;
+
+            // If local storage isn't supported by the browser, or if resume isn't enabled or possible, give up
+            if (resumeEnabled) {
+                localStorageId = handler._getLocalStorageId(id);
+
+                persistedData = {
+                    name: getName(id),
+                    size: getSize(id),
+                    uuid: getUuid(id),
+                    key: fileState.key,
+                    loaded: fileState.loaded,
+                    chunking: fileState.chunking,
+                    lastUpdated: Date.now()
+                };
+
+                localStorage.setItem(localStorageId, JSON.stringify(persistedData));
+            }
+        },
+
+        // Removes a chunked upload record from local storage, if possible.
+        // Returns true if the item was removed, false otherwise.
+        _maybeDeletePersistedChunkData: function(id) {
+            var localStorageId;
+
+            if (resumeEnabled) {
+                localStorageId = handler._getLocalStorageId(id);
+
+                if (localStorageId && localStorage.getItem(localStorageId)) {
+                    localStorage.removeItem(localStorageId);
+                    return true;
+                }
+            }
+
+            return false;
+        },
+
+        // Iterates through all XHR handler-created resume records (in local storage),
+        // invoking the passed callback and passing in the key and value of each local storage record.
+        _iterateResumeRecords: function(callback) {
+            if (resumeEnabled) {
+                qq.each(localStorage, function(key, item) {
+                    if (key.indexOf(qq.format("qq{}resume-", namespace)) === 0) {
+                        var uploadData = JSON.parse(item);
+                        callback(key, uploadData);
+                    }
+                });
+            }
+        },
+
+        /**
+         * @returns {Array} Array of objects containing properties useful to integrators
+         * when it is important to determine which files are potentially resumable.
+         */
+        _getResumableFilesData: function() {
+            var resumableFilesData = [];
+
+            handler._iterateResumeRecords(function(key, uploadData) {
+                resumableFilesData.push({
+                    name: uploadData.name,
+                    size: uploadData.size,
+                    uuid: uploadData.uuid,
+                    partIdx: uploadData.chunking.lastSent + 1,
+                    key: uploadData.key
+                });
+            });
+
+            return resumableFilesData;
+        },
+
+        // Deletes any local storage records that are "expired".
+        _removeExpiredChunkingRecords: function() {
+            var expirationDays = resume.recordsExpireIn;
+
+            handler._iterateResumeRecords(function(key, uploadData) {
+                var expirationDate = new Date(uploadData.lastUpdated);
+
+                // transform updated date into expiration date
+                expirationDate.setDate(expirationDate.getDate() + expirationDays);
+
+                if (expirationDate.getTime() <= Date.now()) {
+                    log("Removing expired resume record with key " + key);
+                    localStorage.removeItem(key);
+                }
+            });
+        },
+
+        /**
+         * @param id File ID
+         * @returns {string} Identifier for this item that may appear in the browser's local storage
+         */
+        _getLocalStorageId: function(id) {
+            var name = getName(id),
+                size = getSize(id),
+                chunkSize = chunking.partSize,
+                endpoint = getEndpoint(id);
+
+            return qq.format("qq{}resume-{}-{}-{}-{}", namespace, name, size, chunkSize, endpoint);
+        }
+    });
+
+    qq.override(this, function(super_) {
+        return {
+            add: function(id, fileOrBlobData) {
+                super_.add.apply(this, arguments);
+
+                if (resumeEnabled) {
+                    handler._maybePrepareForResume(id);
+                }
+            }
+        };
+    });
+};
+
+/*globals qq*/
+/**
+ * Defines the public API for non-traditional FineUploaderBasic mode.
+ */
+(function(){
+    "use strict";
+
+    qq.nonTraditionalBasePublicApi = {
+        setUploadSuccessParams: function(params, id) {
+            this._uploadSuccessParamsStore.set(params, id);
+        }
+    };
+
+
+
+
+    qq.nonTraditionalBasePrivateApi = {
+        /**
+         * When the upload has completed, if it is successful, send a request to the `successEndpoint` (if defined).
+         * This will hold up the call to the `onComplete` callback until we have determined success of the upload
+         * according to the local server, if a `successEndpoint` has been defined by the integrator.
+         *
+         * @param id ID of the completed upload
+         * @param name Name of the associated item
+         * @param result Object created from the server's parsed JSON response.
+         * @param xhr Associated XmlHttpRequest, if this was used to send the request.
+         * @returns {boolean || qq.Promise} true/false if success can be determined immediately, otherwise a `qq.Promise`
+         * if we need to ask the server.
+         * @private
+         */
+        _onComplete: function(id, name, result, xhr) {
+            var success = result.success ? true : false,
+                self = this,
+                onCompleteArgs = arguments,
+                successEndpoint = this._options.uploadSuccess.endpoint,
+                successCustomHeaders = this._options.uploadSuccess.customHeaders,
+                cors = this._options.cors,
+                promise = new qq.Promise(),
+                uploadSuccessParams = this._uploadSuccessParamsStore.get(id),
+
+                // If we are waiting for confirmation from the local server, and have received it,
+                // include properties from the local server response in the `response` parameter
+                // sent to the `onComplete` callback, delegate to the parent `_onComplete`, and
+                // fulfill the associated promise.
+                onSuccessFromServer = function(successRequestResult) {
+                    delete self._failedSuccessRequestCallbacks[id];
+                    qq.extend(result, successRequestResult);
+                    qq.FineUploaderBasic.prototype._onComplete.apply(self, onCompleteArgs);
+                    promise.success(successRequestResult);
+                },
+
+                // If the upload success request fails, attempt to re-send the success request (via the core retry code).
+                // The entire upload may be restarted if the server returns a "reset" property with a value of true as well.
+                onFailureFromServer = function(successRequestResult) {
+                    var callback = submitSuccessRequest;
+
+                    qq.extend(result, successRequestResult);
+
+                    if (result && result.reset) {
+                        callback = null;
+                    }
+
+                    if (!callback) {
+                        delete self._failedSuccessRequestCallbacks[id];
+                    }
+                    else {
+                        self._failedSuccessRequestCallbacks[id] = callback;
+                    }
+
+                    if (!self._onAutoRetry(id, name, result, xhr, callback)) {
+                        qq.FineUploaderBasic.prototype._onComplete.apply(self, onCompleteArgs);
+                        promise.failure(successRequestResult);
+                    }
+                },
+                submitSuccessRequest,
+                successAjaxRequester;
+
+            // Ask the local server if the file sent is ok.
+            if (success && successEndpoint) {
+                successAjaxRequester = new qq.UploadSuccessAjaxRequester({
+                    endpoint: successEndpoint,
+                    customHeaders: successCustomHeaders,
+                    cors: cors,
+                    log: qq.bind(this.log, this)
+                });
+
+
+                // combine custom params and default params
+                qq.extend(uploadSuccessParams, self._getEndpointSpecificParams(id, result, xhr), true);
+
+                submitSuccessRequest = qq.bind(function() {
+                    successAjaxRequester.sendSuccessRequest(id, uploadSuccessParams)
+                        .then(onSuccessFromServer, onFailureFromServer);
+                }, self);
+
+                submitSuccessRequest();
+
+                return promise;
+            }
+
+            // If we are not asking the local server about the file, just delegate to the parent `_onComplete`.
+            return qq.FineUploaderBasic.prototype._onComplete.apply(this, arguments);
+        },
+
+        // If the failure occurred on an upload success request (and a reset was not ordered), try to resend that instead.
+        _manualRetry: function(id) {
+            var successRequestCallback = this._failedSuccessRequestCallbacks[id];
+
+            return qq.FineUploaderBasic.prototype._manualRetry.call(this, id, successRequestCallback);
+        }
+    };
+}());
+
 /*globals qq */
 /**
  * This defines FineUploaderBasic mode w/ support for uploading to S3, which provides all the basic
@@ -6225,7 +6673,9 @@ qq.s3.util = qq.s3.util || (function() {
                 // 'uuid', 'filename', or a function which may be promissory
                 key: "uuid",
 
-                reducedRedundancy: false
+                reducedRedundancy: false,
+
+                serverSideEncryption: false
             },
 
             credentials: {
@@ -6285,10 +6735,12 @@ qq.s3.util = qq.s3.util || (function() {
             this._currentCredentials.accessKey = options.request.accessKey;
         }
 
+        this._aclStore = this._createStore(options.objectProperties.acl);
+
         // Call base module
         qq.FineUploaderBasic.call(this, options);
 
-        this._uploadSuccessParamsStore = this._createParamsStore("uploadSuccess");
+        this._uploadSuccessParamsStore = this._createStore(this._options.uploadSuccess.params);
 
         // This will hold callbacks for failed uploadSuccess requests that will be invoked on retry.
         // Indexed by file ID.
@@ -6301,6 +6753,8 @@ qq.s3.util = qq.s3.util || (function() {
     // Inherit basic public & private API methods.
     qq.extend(qq.s3.FineUploaderBasic.prototype, qq.basePublicApi);
     qq.extend(qq.s3.FineUploaderBasic.prototype, qq.basePrivateApi);
+    qq.extend(qq.s3.FineUploaderBasic.prototype, qq.nonTraditionalBasePublicApi);
+    qq.extend(qq.s3.FineUploaderBasic.prototype, qq.nonTraditionalBasePrivateApi);
 
     // Define public & private API methods for this module.
     qq.extend(qq.s3.FineUploaderBasic.prototype, {
@@ -6326,13 +6780,7 @@ qq.s3.util = qq.s3.util || (function() {
         },
 
         setUploadSuccessParams: function(params, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.uploadSuccess.params = params;
-            }
-            else {
-                this._uploadSuccessParamsStore.setParams(params, id);
-            }
+            this._uploadSuccessParamsStore.set(params, id);
         },
 
         setCredentials: function(credentials, ignoreEmpty) {
@@ -6362,6 +6810,10 @@ qq.s3.util = qq.s3.util || (function() {
             }
         },
 
+        setAcl: function(acl, id) {
+            this._aclStore.set(acl, id);
+        },
+
         /**
          * Ensures the parent's upload handler creator passes any additional S3-specific options to the handler as well
          * as information required to instantiate the specific handler based on the current browser's capabilities.
@@ -6373,6 +6825,7 @@ qq.s3.util = qq.s3.util || (function() {
             var self = this,
                 additionalOptions = {
                     objectProperties: this._options.objectProperties,
+                    aclStore: this._aclStore,
                     signature: this._options.signature,
                     iframeSupport: this._options.iframeSupport,
                     getKeyName: qq.bind(this._determineKeyName, this),
@@ -6386,14 +6839,30 @@ qq.s3.util = qq.s3.util || (function() {
             // We assume HTTP if it is missing from the start of the endpoint string.
             qq.override(this._endpointStore, function(super_) {
                 return {
-                    getEndpoint: function(id) {
-                        var endpoint = super_.getEndpoint(id);
+                    get: function(id) {
+                        var endpoint = super_.get(id);
 
                         if (endpoint.indexOf("http") < 0) {
-                            return "http://" + endpoint;
+                            return "https://" + endpoint;
                         }
 
                         return endpoint;
+                    }
+                };
+            });
+
+            // Param names should be lower case to avoid signature mismatches
+            qq.override(this._paramsStore, function(super_) {
+                return {
+                    get: function(id) {
+                        var oldParams = super_.get(id),
+                            modifiedParams = {};
+
+                        qq.each(oldParams, function(name, val) {
+                            modifiedParams[name.toLowerCase()] = val;
+                        });
+
+                        return modifiedParams;
                     }
                 };
             });
@@ -6515,116 +6984,32 @@ qq.s3.util = qq.s3.util || (function() {
             }
         },
 
-        /**
-         * When the upload has completed, if it is successful, send a request to the `successEndpoint` (if defined).
-         * This will hold up the call to the `onComplete` callback until we have determined success of the upload to S3
-         * according to the local server, if a `successEndpoint` has been defined by the integrator.
-         *
-         * @param id ID of the completed upload
-         * @param name Name of the associated item
-         * @param result Object created from the server's parsed JSON response.
-         * @param xhr Associated XmlHttpRequest, if this was used to send the request.
-         * @returns {boolean || qq.Promise} true/false if success can be determined immediately, otherwise a `qq.Promise`
-         * if we need to ask the server.
-         * @private
-         */
-        _onComplete: function(id, name, result, xhr) {
-            var success = result.success ? true : false,
-                self = this,
-                onCompleteArgs = arguments,
-                key = this.getKey(id),
-                successEndpoint = this._options.uploadSuccess.endpoint,
-                successCustomHeaders = this._options.uploadSuccess.customHeaders,
-                cors = this._options.cors,
-                uuid = this.getUuid(id),
-                bucket = qq.s3.util.getBucket(this._endpointStore.getEndpoint(id)),
-                promise = new qq.Promise(),
-                uploadSuccessParams = this._uploadSuccessParamsStore.getParams(id),
+        _getEndpointSpecificParams: function(id, response, maybeXhr) {
+            var params = {
+                key: this.getKey(id),
+                uuid: this.getUuid(id),
+                name: this.getName(id),
+                bucket: qq.s3.util.getBucket(this._endpointStore.get(id))
+            };
 
-                // If we are waiting for confirmation from the local server, and have received it,
-                // include properties from the local server response in the `response` parameter
-                // sent to the `onComplete` callback, delegate to the parent `_onComplete`, and
-                // fulfill the associated promise.
-                onSuccessFromServer = function(awsSuccessRequestResult) {
-                    delete self._failedSuccessRequestCallbacks[id];
-                    qq.extend(result, awsSuccessRequestResult);
-                    qq.FineUploaderBasic.prototype._onComplete.apply(self, onCompleteArgs);
-                    promise.success(awsSuccessRequestResult);
-                },
-
-                // If the upload success request fails, attempt to re-send the success request (via the core retry code).
-                // The entire upload may be restarted if the server returns a "reset" property with a value of true as well.
-                onFailureFromServer = function(awsSuccessRequestResult) {
-                    var callback = submitSuccessRequest;
-
-                    qq.extend(result, awsSuccessRequestResult);
-
-                    if (result && result.reset) {
-                        callback = null;
-                    }
-
-                    if (!callback) {
-                        delete self._failedSuccessRequestCallbacks[id];
-                    }
-                    else {
-                        self._failedSuccessRequestCallbacks[id] = callback;
-                    }
-
-                    if (!self._onAutoRetry(id, name, result, xhr, callback)) {
-                        qq.FineUploaderBasic.prototype._onComplete.apply(self, onCompleteArgs);
-                        promise.failure(awsSuccessRequestResult);
-                    }
-                },
-                submitSuccessRequest,
-                successAjaxRequester;
-
-            // Ask the local server if the file sent to S3 is ok.
-            if (success && successEndpoint) {
-                successAjaxRequester = new qq.s3.UploadSuccessAjaxRequester({
-                    endpoint: successEndpoint,
-                    customHeaders: successCustomHeaders,
-                    cors: cors,
-                    log: qq.bind(this.log, this)
-                });
-
-
-                // combine custom params and default params
-                qq.extend(uploadSuccessParams, {
-                    key: key,
-                    uuid: uuid,
-                    name: name,
-                    bucket: bucket
-                }, true);
-
-                submitSuccessRequest = qq.bind(function() {
-                    successAjaxRequester.sendSuccessRequest(id, uploadSuccessParams)
-                        .then(onSuccessFromServer, onFailureFromServer);
-                }, self);
-
-                submitSuccessRequest();
-
-                return promise;
+            if (maybeXhr && maybeXhr.getResponseHeader("ETag")) {
+                params.etag = maybeXhr.getResponseHeader("ETag");
+            }
+            else if (response.etag) {
+                params.etag = response.etag;
             }
 
-            // If we are not asking the local server about the file in S3, just delegate to the parent `_onComplete`.
-            return qq.FineUploaderBasic.prototype._onComplete.apply(this, arguments);
-        },
-
-        // If the failure occurred on an uplaod success request (and a reset was not ordered), try to resend that instead.
-        _manualRetry: function(id) {
-            var successRequestCallback = this._failedSuccessRequestCallbacks[id];
-
-            return qq.FineUploaderBasic.prototype._manualRetry.call(this, id, successRequestCallback);
+            return params;
         },
 
         // Hooks into the base internal `_onSubmitDelete` to add key and bucket params to the delete file request.
         _onSubmitDelete: function(id, onSuccessCallback) {
             var additionalMandatedParams = {
                 key: this.getKey(id),
-                bucket: qq.s3.util.getBucket(this._endpointStore.getEndpoint(id))
+                bucket: qq.s3.util.getBucket(this._endpointStore.get(id))
             };
 
-            qq.FineUploaderBasic.prototype._onSubmitDelete.call(this, id, onSuccessCallback, additionalMandatedParams);
+            return qq.FineUploaderBasic.prototype._onSubmitDelete.call(this, id, onSuccessCallback, additionalMandatedParams);
         },
 
         _addCannedFile: function(sessionData) {
@@ -6822,11 +7207,11 @@ qq.s3.RequestSigner = function(o) {
         signatureEffort.success({signature: headersHmacSha1Base64});
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         method: options.method,
         contentType: "application/json; charset=utf-8",
         endpointStore: {
-            getEndpoint: function() {
+            get: function() {
                 return options.signatureSpec.endpoint;
             }
         },
@@ -6839,7 +7224,7 @@ qq.s3.RequestSigner = function(o) {
         successfulResponseCodes: {
             POST: [200]
         }
-    });
+    }));
 
 
     qq.extend(this, {
@@ -6961,14 +7346,14 @@ qq.s3.RequestSigner.prototype.REQUEST_TYPE = {
 
 /*globals qq, XMLHttpRequest*/
 /**
- * Sends a POST request to the server to notify it of a successful upload to S3.  The server is expected to indicate success
+ * Sends a POST request to the server to notify it of a successful upload to an endpoint.  The server is expected to indicate success
  * or failure via the response status.  Specific information about the failure can be passed from the server via an `error`
  * property (by default) in an "application/json" response.
  *
  * @param o Options associated with all requests.
  * @constructor
  */
-qq.s3.UploadSuccessAjaxRequester = function(o) {
+qq.UploadSuccessAjaxRequester = function(o) {
     "use strict";
 
     var requester,
@@ -6997,7 +7382,7 @@ qq.s3.UploadSuccessAjaxRequester = function(o) {
 
         delete pendingRequests[id];
 
-        options.log(qq.format("Received the following response body to an AWS upload success request for id {}: {}", id, responseJson));
+        options.log(qq.format("Received the following response body to an upload success request for id {}: {}", id, responseJson));
 
         try {
             parsedResponse = qq.parseJson(responseJson);
@@ -7018,7 +7403,7 @@ qq.s3.UploadSuccessAjaxRequester = function(o) {
         catch (error) {
             // This will be executed if a JSON response is not present.  This is not mandatory, so account for this properly.
             if (isError) {
-                options.log(qq.format("Your server indicated failure in its AWS upload success request response for id {}!", id), "error");
+                options.log(qq.format("Your server indicated failure in its upload success request response for id {}!", id), "error");
                 promise.failure(failureIndicator);
             }
             else {
@@ -7028,10 +7413,10 @@ qq.s3.UploadSuccessAjaxRequester = function(o) {
         }
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         method: options.method,
         endpointStore: {
-            getEndpoint: function() {
+            get: function() {
                 return options.endpoint;
             }
         },
@@ -7044,12 +7429,12 @@ qq.s3.UploadSuccessAjaxRequester = function(o) {
         successfulResponseCodes: {
             POST: [200]
         }
-    });
+    }));
 
 
     qq.extend(this, {
         /**
-         * Sends a request to the server, notifying it that a recently submitted file was successfully sent to S3.
+         * Sends a request to the server, notifying it that a recently submitted file was successfully sent.
          *
          * @param id ID of the associated file
          * @param spec `Object` with the properties that correspond to important values that we want to
@@ -7092,8 +7477,9 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
             endpointStore: null,
             paramsStore: null,
             signatureSpec: null,
-            acl: "private",
+            aclStore: null,
             reducedRedundancy: false,
+            serverSideEncryption: false,
             maxConnections: 3,
             getContentType: function(id) {},
             getKey: function(id) {},
@@ -7121,21 +7507,25 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
      * @returns {qq.Promise}
      */
     function getHeaders(id) {
-        var bucket = qq.s3.util.getBucket(options.endpointStore.getEndpoint(id)),
+        var bucket = qq.s3.util.getBucket(options.endpointStore.get(id)),
             headers = {},
             promise = new qq.Promise(),
             key = options.getKey(id),
             signatureConstructor;
 
-        headers["x-amz-acl"] = options.acl;
+        headers["x-amz-acl"] = options.aclStore.get(id);
 
         if (options.reducedRedundancy) {
             headers[qq.s3.util.REDUCED_REDUNDANCY_PARAM_NAME] = qq.s3.util.REDUCED_REDUNDANCY_PARAM_VALUE;
         }
 
+        if (options.serverSideEncryption) {
+            headers[qq.s3.util.SERVER_SIDE_ENCRYPTION_PARAM_NAME] = qq.s3.util.SERVER_SIDE_ENCRYPTION_PARAM_VALUE;
+        }
+
         headers[qq.s3.util.AWS_PARAM_PREFIX + options.filenameParam] = encodeURIComponent(options.getName(id));
 
-        qq.each(options.paramsStore.getParams(id), function(name, val) {
+        qq.each(options.paramsStore.get(id), function(name, val) {
             headers[qq.s3.util.AWS_PARAM_PREFIX + name] = encodeURIComponent(val);
         });
 
@@ -7207,7 +7597,7 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
         }
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         method: options.method,
         contentType: null,
         endpointStore: options.endpointStore,
@@ -7218,7 +7608,7 @@ qq.s3.InitiateMultipartAjaxRequester = function(o) {
         successfulResponseCodes: {
             POST: [200]
         }
-    });
+    }));
 
 
     qq.extend(this, {
@@ -7293,7 +7683,7 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
     function getHeaders(id, uploadId) {
         var headers = {},
             promise = new qq.Promise(),
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = options.endpointStore.get(id),
             bucket = qq.s3.util.getBucket(endpoint),
             signatureConstructor = getSignatureAjaxRequester.constructStringToSign
                 (getSignatureAjaxRequester.REQUEST_TYPE.MULTIPART_COMPLETE, bucket, options.getKey(id))
@@ -7321,7 +7711,7 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
     function handleCompleteRequestComplete(id, xhr, isError) {
         var promise = pendingCompleteRequests[id],
             domParser = new DOMParser(),
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = options.endpointStore.get(id),
             bucket = qq.s3.util.getBucket(endpoint),
             key = options.getKey(id),
             responseDoc = domParser.parseFromString(xhr.responseText, "application/xml"),
@@ -7388,7 +7778,7 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
         return new XMLSerializer().serializeToString(doc);
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         method: options.method,
         contentType: "application/xml; charset=UTF-8",
         endpointStore: options.endpointStore,
@@ -7399,7 +7789,7 @@ qq.s3.CompleteMultipartAjaxRequester = function(o) {
         successfulResponseCodes: {
             POST: [200]
         }
-    });
+    }));
 
 
     qq.extend(this, {
@@ -7477,7 +7867,7 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
     function getHeaders(id, uploadId) {
         var headers = {},
             promise = new qq.Promise(),
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = options.endpointStore.get(id),
             bucket = qq.s3.util.getBucket(endpoint),
             signatureConstructor = getSignatureAjaxRequester.constructStringToSign
                 (getSignatureAjaxRequester.REQUEST_TYPE.MULTIPART_ABORT, bucket, options.getKey(id))
@@ -7528,7 +7918,7 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
     }
 
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         validMethods: ["DELETE"],
         method: options.method,
         contentType: null,
@@ -7540,7 +7930,7 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
         successfulResponseCodes: {
             DELETE: [204]
         }
-    });
+    }));
 
 
     qq.extend(this, {
@@ -7574,7 +7964,7 @@ qq.s3.AbortMultipartAjaxRequester = function(o) {
 qq.s3.UploadHandlerForm = function(options, proxy) {
     "use strict";
 
-    var fileState = [],
+    var handler = this,
         uploadCompleteCallback = proxy.onUploadComplete,
         onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
@@ -7586,8 +7976,9 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
         filenameParam = options.filenameParam,
         paramsStore = options.paramsStore,
         endpointStore = options.endpointStore,
-        acl = options.objectProperties.acl,
+        aclStore = options.aclStore,
         reducedRedundancy = options.objectProperties.reducedRedundancy,
+        serverSideEncryption = options.objectProperties.serverSideEncryption,
         validation = options.validation,
         signature = options.signature,
         successRedirectUrl = options.iframeSupport.localBlankPagePath,
@@ -7596,8 +7987,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
             signatureSpec: signature,
             cors: options.cors,
             log: log
-        }),
-        internalApi = {};
+        });
 
 
     if (successRedirectUrl === undefined) {
@@ -7615,7 +8005,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
      */
     function isValidResponse(id, iframe) {
         var response,
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = options.endpointStore.get(id),
             bucket = qq.s3.util.getBucket(endpoint);
 
 
@@ -7627,7 +8017,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
 
             var responseData = qq.s3.util.parseIframeResponse(iframe);
             if (responseData.bucket === bucket &&
-                responseData.key === qq.s3.util.encodeQueryStringParam(fileState[id].key)) {
+                responseData.key === qq.s3.util.encodeQueryStringParam(handler._getFileState(id).key)) {
 
                 return true;
             }
@@ -7644,21 +8034,22 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
 
     function generateAwsParams(id) {
         /*jshint -W040 */
-        var customParams = paramsStore.getParams(id);
+        var customParams = paramsStore.get(id);
 
         customParams[filenameParam] = getName(id);
 
         return qq.s3.util.generateAwsParams({
-                endpoint: endpointStore.getEndpoint(id),
+                endpoint: endpointStore.get(id),
                 params: customParams,
-                key: fileState[id].key,
+                key: handler._getFileState(id).key,
                 accessKey: credentialsProvider.get().accessKey,
                 sessionToken: credentialsProvider.get().sessionToken,
-                acl: acl,
+                acl: aclStore.get(id),
                 minFileSize: validation.minSizeLimit,
                 maxFileSize: validation.maxSizeLimit,
                 successRedirectUrl: successRedirectUrl,
                 reducedRedundancy: reducedRedundancy,
+                serverSideEncryption: serverSideEncryption,
                 log: log
             },
             qq.bind(getSignatureAjaxRequester.getSignature, this, id));
@@ -7670,11 +8061,11 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
     function createForm(id, iframe) {
         var promise = new qq.Promise(),
             method = options.demoMode ? "GET" : "POST",
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = options.endpointStore.get(id),
             fileName = getName(id);
 
         generateAwsParams(id).then(function(params) {
-            var form = internalApi.initFormForUpload({
+            var form = handler._initFormForUpload({
                 method: method,
                 endpoint: endpoint,
                 params: params,
@@ -7693,8 +8084,8 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
 
     function handleUpload(id) {
         var fileName = getName(id),
-            iframe = internalApi.createIframe(id),
-            input = fileState[id].input;
+            iframe = handler._createIframe(id),
+            input = handler._getFileState(id).input;
 
         createForm(id, iframe).then(function(form) {
             onUpload(id, fileName);
@@ -7702,7 +8093,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
             form.appendChild(input);
 
             // Register a callback when the response comes in from S3
-            internalApi.attachLoadEvent(iframe, function(response) {
+            handler._attachLoadEvent(iframe, function(response) {
                 log("iframe loaded");
 
                 // If the common response handler has determined success or failure immediately
@@ -7721,6 +8112,9 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
                     if (response.success === false) {
                         log("A success response was received by Amazon, but it was invalid in some way.", "error");
                     }
+                    else {
+                        qq.extend(response, qq.s3.util.parseIframeResponse(iframe));
+                    }
                 }
 
                 handleFinishedUpload(id, iframe, fileName, response);
@@ -7733,7 +8127,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
     }
 
     function handleFinishedUpload(id, iframe, fileName, response) {
-        internalApi.detachLoadEvent(id);
+        handler._detachLoadEvent(id);
 
         iframe && qq(iframe).remove();
 
@@ -7746,13 +8140,25 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
         uploadCompleteCallback(id);
     }
 
-    qq.extend(this, new qq.UploadHandlerFormApi(internalApi,
-        {fileState: fileState, isCors: false, inputName: "file"},
-        {onCancel: options.onCancel, onUuidChanged: onUuidChanged, getName: getName, getUuid: getUuid, log: log}));
+    qq.extend(this, new qq.AbstractUploadHandlerForm({
+            options: {
+                isCors: false,
+                inputName: "file"
+            },
+
+            proxy: {
+                onCancel: options.onCancel,
+                onUuidChanged: onUuidChanged,
+                getName: getName,
+                getUuid: getUuid,
+                log: log
+            }
+        }
+    ));
 
     qq.extend(this, {
         upload: function(id) {
-            var input = fileState[id].input,
+            var input = handler._getFileState(id).input,
                 name = getName(id);
 
             if (!input){
@@ -7760,14 +8166,14 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
             }
 
             if (this.isValid(id)) {
-                if (fileState[id].key) {
+                if (handler._getFileState(id).key) {
                     handleUpload(id);
                 }
                 else {
                     // The S3 uploader module will either calculate the key or ask the server for it
                     // and will call us back once it is known.
                     onGetKeyName(id, name).then(function(key) {
-                        fileState[id].key = key;
+                        handler._getFileState(id).key = key;
                         handleUpload(id);
                     }, function(errorReason) {
                         handleFinishedUpload(id, null, name, {error: errorReason});
@@ -7777,7 +8183,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
         },
 
         getThirdPartyFileId: function(id) {
-            return fileState[id].key;
+            return handler._getFileState(id).key;
         }
     });
 };
@@ -7795,8 +8201,7 @@ qq.s3.UploadHandlerForm = function(options, proxy) {
 qq.s3.UploadHandlerXhr = function(spec, proxy) {
     "use strict";
 
-    var fileState = [],
-        uploadCompleteCallback = proxy.onUploadComplete,
+    var uploadCompleteCallback = proxy.onUploadComplete,
         onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
         getUuid = proxy.getUuid,
@@ -7810,14 +8215,14 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
         filenameParam = spec.filenameParam,
         paramsStore = spec.paramsStore,
         endpointStore = spec.endpointStore,
-        acl = spec.objectProperties.acl,
+        aclStore = spec.aclStore,
         reducedRedundancy = spec.objectProperties.reducedRedundancy,
+        serverSideEncryption = spec.objectProperties.serverSideEncryption,
         validation = spec.validation,
         signature = spec.signature,
         chunkingPossible = spec.chunking.enabled && qq.supportedFeatures.chunking,
         resumeEnabled = spec.resume.enabled && chunkingPossible && qq.supportedFeatures.resume && window.localStorage !== undefined,
-        internalApi = {},
-        publicApi = this,
+        handler = this,
         credentialsProvider = spec.signature.credentialsProvider,
         policySignatureRequester = new qq.s3.RequestSigner({
             expectingPolicy: true,
@@ -7835,12 +8240,13 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
             endpointStore: endpointStore,
             paramsStore: paramsStore,
             signatureSpec: signature,
-            acl: acl,
+            aclStore: aclStore,
             reducedRedundancy: reducedRedundancy,
+            serverSideEncryption: serverSideEncryption,
             cors: spec.cors,
             log: log,
             getContentType: function(id) {
-                return publicApi.getFile(id).type;
+                return handler._getMimeType(id);
             },
             getKey: function(id) {
                 return getUrlSafeKey(id);
@@ -7876,11 +8282,11 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
     }
 
     function getActualKey(id) {
-        return fileState[id].key;
+        return handler._getFileState(id).key;
     }
 
     function setKey(id, key) {
-        fileState[id].key = key;
+        handler._getFileState(id).key = key;
     }
 
     /**
@@ -7889,34 +8295,32 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      * @param id Associated file ID
      */
     function handleUpload(id) {
-        var fileOrBlob = publicApi.getFile(id);
+        var fileOrBlob = handler.getFile(id);
 
-        fileState[id].type = fileOrBlob.type;
+        handler._createXhr(id);
 
-        internalApi.createXhr(id);
-
-        if (shouldChunkThisFile(id)) {
+        if (handler._shouldChunkThisFile(id)) {
             // We might be retrying a failed in-progress upload, so it's important that we
             // don't reset this value so we don't wipe out the record of all successfully
             // uploaded chunks for this file.
-            if (fileState[id].loaded === undefined) {
-                fileState[id].loaded = 0;
+            if (handler._getFileState(id).loaded === undefined) {
+                handler._getFileState(id).loaded = 0;
             }
 
             handleChunkedUpload(id);
         }
         else {
-            fileState[id].loaded = 0;
+            handler._getFileState(id).loaded = 0;
             handleSimpleUpload(id);
         }
     }
 
     function getReadyStateChangeHandler(id) {
-        var xhr = fileState[id].xhr;
+        var xhr = handler._getFileState(id).xhr;
 
         return function() {
             if (xhr.readyState === 4) {
-                if (fileState[id].chunking.enabled) {
+                if (handler._getFileState(id).chunking.enabled) {
                     uploadChunkCompleted(id);
                 }
                 else {
@@ -7946,14 +8350,14 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      * @param requestXhr The XHR object associated with the call, if the upload XHR is not appropriate.
      */
     function uploadCompleted(id, errorDetails, requestXhr) {
-        var xhr = requestXhr || fileState[id].xhr,
+        var xhr = requestXhr || handler._getFileState(id).xhr,
             name = getName(id),
             size = getSize(id),
             // This is the response we will use internally to determine if we need to do something special in case of a failure
             responseToExamine = parseResponse(id, requestXhr),
             // This is the response we plan on passing to external callbacks
             responseToBubble = errorDetails || parseResponse(id),
-            paused = fileState[id].paused,
+            paused = handler._getFileState(id).paused,
             /*jshint -W116*/
             isError = !paused && (errorDetails != null || responseToExamine.success !== true);
 
@@ -7961,9 +8365,9 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
         if (isError) {
             if (shouldResetOnRetry(responseToExamine.code)) {
                 log("This is an unrecoverable error, we must restart the upload entirely on the next retry attempt.", "error");
-                maybeDeletePersistedChunkData(id);
-                delete fileState[id].loaded;
-                delete fileState[id].chunking;
+                handler._maybeDeletePersistedChunkData(id);
+                delete handler._getFileState(id).loaded;
+                delete handler._getFileState(id).chunking;
             }
         }
 
@@ -7975,9 +8379,9 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
             if (!isError && !paused) {
                 responseToBubble.success = true;
                 onProgress(id, name, size, size);
-                maybeDeletePersistedChunkData(id);
-                delete fileState[id].loaded;
-                delete fileState[id].chunking;
+                handler._maybeDeletePersistedChunkData(id);
+                delete handler._getFileState(id).loaded;
+                delete handler._getFileState(id).chunking;
             }
 
             // Only declare the upload complete (to listeners) if it has not been paused.
@@ -7986,7 +8390,7 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
             }
             else {
                 onComplete(id, name, responseToBubble, xhr);
-                fileState[id] && delete fileState[id].xhr;
+                handler._getFileState(id) && delete handler._getFileState(id).xhr;
                 uploadCompleteCallback(id);
             }
         }
@@ -7998,7 +8402,7 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      * @returns {object} Object containing the parsed response, or perhaps some error data injected in `error` and `code` properties
      */
     function parseResponse(id, requestXhr) {
-        var xhr = requestXhr || fileState[id].xhr,
+        var xhr = requestXhr || handler._getFileState(id).xhr,
             response = {},
             parsedErrorProps;
 
@@ -8056,8 +8460,8 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
     function handleStartUploadSignal(id, retry) {
         var name = getName(id);
 
-        if (publicApi.isValid(id)) {
-            maybePrepareForResume(id);
+        if (handler.isValid(id)) {
+            handler._maybePrepareForResume(id);
 
             if (getActualKey(id) !== undefined) {
                 onUpload(id, name);
@@ -8082,13 +8486,13 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
 
     // Starting point for incoming requests for simple (non-chunked) uploads.
     function handleSimpleUpload(id) {
-        var xhr = fileState[id].xhr,
+        var xhr = handler._getFileState(id).xhr,
             name = getName(id),
-            fileOrBlob = publicApi.getFile(id);
+            fileOrBlob = handler.getFile(id);
 
         xhr.upload.onprogress = function(e){
             if (e.lengthComputable){
-                fileState[id].loaded = e.loaded;
+                handler._getFileState(id).loaded = e.loaded;
                 onProgress(id, name, e.loaded, e.total);
             }
         };
@@ -8113,21 +8517,22 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      */
     function generateAwsParams(id) {
         /*jshint -W040 */
-        var customParams = paramsStore.getParams(id);
+        var customParams = paramsStore.get(id);
         customParams[filenameParam] = getName(id);
 
         return qq.s3.util.generateAwsParams({
-                endpoint: endpointStore.getEndpoint(id),
+                endpoint: endpointStore.get(id),
                 params: customParams,
-                type: fileState[id].type,
+                type: handler._getMimeType(id),
                 key: getActualKey(id),
                 accessKey: credentialsProvider.get().accessKey,
                 sessionToken: credentialsProvider.get().sessionToken,
-                acl: acl,
+                acl: aclStore.get(id),
                 expectedStatus: expectedStatus,
                 minFileSize: validation.minSizeLimit,
                 maxFileSize: validation.maxSizeLimit,
                 reducedRedundancy: reducedRedundancy,
+                serverSideEncryption: serverSideEncryption,
                 log: log
             },
             qq.bind(policySignatureRequester.getSignature, this, id));
@@ -8147,9 +8552,9 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      */
     function prepareForSend(id, fileOrBlob) {
         var formData = new FormData(),
-            endpoint = endpointStore.getEndpoint(id),
+            endpoint = endpointStore.get(id),
             url = endpoint,
-            xhr = fileState[id].xhr,
+            xhr = handler._getFileState(id).xhr,
             promise = new qq.Promise();
 
         generateAwsParams(id).then(
@@ -8178,159 +8583,6 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
 
 // ************************** Chunked Uploads ******************************
 
-
-    // If this is a resumable upload, grab the relevant data from storage and items in memory that track this upload
-    // so we can pick up from where we left off.
-    function maybePrepareForResume(id) {
-        var localStorageId, persistedData;
-
-        // Resume is enabled and possible and this is the first time we've tried to upload this file in this session,
-        // so prepare for a resume attempt.
-        if (resumeEnabled && getActualKey(id) === undefined) {
-            localStorageId = getLocalStorageId(id);
-            persistedData = localStorage.getItem(localStorageId);
-
-            // If we haven't found this item in local storage, give up
-            if (persistedData) {
-                log(qq.format("Identified file with ID {} and name of {} as resumable.", id, getName(id)));
-
-                persistedData = JSON.parse(persistedData);
-
-                onUuidChanged(id, persistedData.uuid);
-                setKey(id, persistedData.key);
-                fileState[id].loaded = persistedData.loaded;
-                fileState[id].chunking = persistedData.chunking;
-            }
-        }
-    }
-
-    // Persist any data needed to resume this upload in a new session.
-    function maybePersistChunkedState(id) {
-        var localStorageId, persistedData;
-
-        // If local storage isn't supported by the browser, or if resume isn't enabled or possible, give up
-        if (resumeEnabled) {
-            localStorageId = getLocalStorageId(id);
-
-            persistedData = {
-                name: getName(id),
-                size: getSize(id),
-                uuid: getUuid(id),
-                key: getActualKey(id),
-                loaded: fileState[id].loaded,
-                chunking: fileState[id].chunking,
-                lastUpdated: Date.now()
-            };
-
-            localStorage.setItem(localStorageId, JSON.stringify(persistedData));
-        }
-    }
-
-    // Removes a chunked upload record from local storage, if possible.
-    // Returns true if the item was removed, false otherwise.
-    function maybeDeletePersistedChunkData(id) {
-        var localStorageId;
-
-        if (resumeEnabled) {
-            localStorageId = getLocalStorageId(id);
-
-            if (localStorageId && localStorage.getItem(localStorageId)) {
-                localStorage.removeItem(localStorageId);
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // Iterates through all S3 XHR handler-created resume records (in local storage),
-    // invoking the passed callback and passing in the key and value of each local storage record.
-    function iterateResumeRecords(callback) {
-        if (resumeEnabled) {
-            qq.each(localStorage, function(key, item) {
-                if (key.indexOf("qqs3resume-") === 0) {
-                    var uploadData = JSON.parse(item);
-                    callback(key, uploadData);
-                }
-            });
-        }
-    }
-
-    /**
-     * @returns {Array} Array of objects containing properties useful to integrators
-     * when it is important to determine which files are potentially resumable.
-     */
-    function getResumableFilesData() {
-        var resumableFilesData = [];
-
-        iterateResumeRecords(function(key, uploadData) {
-            resumableFilesData.push({
-                name: uploadData.name,
-                size: uploadData.size,
-                uuid: uploadData.uuid,
-                partIdx: uploadData.chunking.lastSent + 1,
-                key: uploadData.key
-            });
-        });
-
-        return resumableFilesData;
-    }
-
-    // Deletes any local storage records that are "expired".
-    function removeExpiredChunkingRecords() {
-        var expirationDays = spec.resume.recordsExpireIn;
-
-        iterateResumeRecords(function(key, uploadData) {
-            var expirationDate = new Date(uploadData.lastUpdated);
-
-            // transform updated date into expiration date
-            expirationDate.setDate(expirationDate.getDate() + expirationDays);
-
-            if (expirationDate.getTime() <= Date.now()) {
-                log("Removing expired resume record with key " + key);
-                localStorage.removeItem(key);
-            }
-        });
-    }
-
-    /**
-     * @param id File ID
-     * @returns {string} Identifier for this item that may appear in the browser's local storage
-     */
-    function getLocalStorageId(id) {
-        var name = getName(id),
-            size = getSize(id),
-            chunkSize = spec.chunking.partSize,
-            endpoint = spec.endpointStore.getEndpoint(id),
-            bucket = qq.s3.util.getBucket(endpoint);
-
-        return qq.format("qqs3resume-{}-{}-{}-{}", name, size, chunkSize, bucket);
-    }
-
-    /**
-     * Determine if the associated file should be chunked.
-     *
-     * @param id ID of the associated file
-     * @returns {*} true if chunking is enabled, possible, and the file can be split into more than 1 part
-     */
-    function shouldChunkThisFile(id) {
-        var totalChunks;
-
-        if (!fileState[id].chunking) {
-            fileState[id].chunking = {};
-            totalChunks = internalApi.getTotalChunks(id);
-            if (totalChunks > 1) {
-                fileState[id].chunking.enabled = true;
-                fileState[id].chunking.parts = totalChunks;
-            }
-            else {
-                fileState[id].chunking.enabled = false;
-            }
-        }
-
-        return fileState[id].chunking.enabled;
-    }
-
     // Starting point for incoming requests for chunked uploads.
     function handleChunkedUpload(id) {
         maybeInitiateMultipart(id).then(
@@ -8353,13 +8605,13 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      * @returns {number} The 0-based index of the next file chunk to be sent to S3
      */
     function getNextPartIdxToSend(id) {
-        return fileState[id].chunking.lastSent >= 0 ? fileState[id].chunking.lastSent + 1 : 0;
+        return handler._getFileState(id).chunking.lastSent >= 0 ? handler._getFileState(id).chunking.lastSent + 1 : 0;
     }
 
     // Either initiate an upload for the next chunk for an associated file, or initiate a
     // "Complete Multipart Upload" request if there are no more parts to be sent.
     function maybeUploadNextChunk(id) {
-        var totalParts = fileState[id].chunking.parts,
+        var totalParts = handler._getFileState(id).chunking.parts,
             nextPartIdx = getNextPartIdxToSend(id);
 
         if (nextPartIdx < totalParts) {
@@ -8373,8 +8625,8 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
     // Sends a "Complete Multipart Upload" request and then signals completion of the upload
     // when the response to this request has been parsed.
     function completeMultipart(id) {
-        var uploadId = fileState[id].chunking.uploadId,
-            etagMap = fileState[id].chunking.etags;
+        var uploadId = handler._getFileState(id).chunking.uploadId,
+            etagMap = handler._getFileState(id).chunking.etags;
 
         completeMultipartRequester.send(id, uploadId, etagMap).then(
             // Successfully completed
@@ -8393,21 +8645,21 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
     function uploadNextChunk(id) {
         var idx = getNextPartIdxToSend(id),
             name = getName(id),
-            xhr = fileState[id].xhr,
+            xhr = handler._getFileState(id).xhr,
             totalFileSize = getSize(id),
-            chunkData = internalApi.getChunkData(id, idx),
-            domain = spec.endpointStore.getEndpoint(id);
+            chunkData = handler._getChunkData(id, idx),
+            domain = spec.endpointStore.get(id);
 
         // Add appropriate headers to the multipart upload request.
         // Once these have been determined (asynchronously) attach the headers and send the chunk.
         addChunkedHeaders(id).then(function(headers, endOfUrl) {
             var url = domain + "/" + endOfUrl;
 
-            spec.onUploadChunk(id, name, internalApi.getChunkDataForCallback(chunkData));
+            spec.onUploadChunk(id, name, handler._getChunkDataForCallback(chunkData));
 
             xhr.upload.onprogress = function(e) {
                 if (e.lengthComputable) {
-                    var totalLoaded = e.loaded + fileState[id].loaded;
+                    var totalLoaded = e.loaded + handler._getFileState(id).loaded;
 
                     spec.onProgress(id, name, totalLoaded, totalFileSize);
                 }
@@ -8440,14 +8692,14 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      */
     function addChunkedHeaders(id) {
         var headers = {},
-            endpoint = spec.endpointStore.getEndpoint(id),
+            endpoint = spec.endpointStore.get(id),
             bucket = qq.s3.util.getBucket(endpoint),
             key = getUrlSafeKey(id),
             promise = new qq.Promise(),
             signatureConstructor = restSignatureRequester.constructStringToSign
                 (restSignatureRequester.REQUEST_TYPE.MULTIPART_UPLOAD, bucket, key)
                 .withPartNum(getNextPartIdxToSend(id) + 1)
-                .withUploadId(fileState[id].chunking.uploadId);
+                .withUploadId(handler._getFileState(id).chunking.uploadId);
 
         // Ask the local server to sign the request.  Use this signature to form the Authorization header.
         restSignatureRequester.getSignature(id, {signatureConstructor: signatureConstructor}).then(function(response) {
@@ -8467,15 +8719,15 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
      * @returns {qq.Promise} A promise that is fulfilled when the initiate request has been sent and the response has been parsed.
      */
     function maybeInitiateMultipart(id) {
-        if (!fileState[id].chunking.uploadId) {
+        if (!handler._getFileState(id).chunking.uploadId) {
             return initiateMultipartRequester.send(id).then(
                 function(uploadId) {
-                    fileState[id].chunking.uploadId = uploadId;
+                    handler._getFileState(id).chunking.uploadId = uploadId;
                 }
             );
         }
         else {
-            return new qq.Promise().success(fileState[id].chunking.uploadId);
+            return new qq.Promise().success(handler._getFileState(id).chunking.uploadId);
         }
     }
 
@@ -8485,26 +8737,26 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
     // We need these items to "Complete" the multipart upload after all chunks have been successfully sent.
     function uploadChunkCompleted(id) {
         var idxSent = getNextPartIdxToSend(id),
-            xhr = fileState[id].xhr,
+            xhr = handler._getFileState(id).xhr,
             response = parseResponse(id),
-            chunkData = internalApi.getChunkData(id, idxSent),
+            chunkData = handler._getChunkData(id, idxSent),
             etag;
 
         if (response.success) {
-            fileState[id].chunking.lastSent = idxSent;
+            handler._getFileState(id).chunking.lastSent = idxSent;
             etag = xhr.getResponseHeader("ETag");
 
-            if (!fileState[id].chunking.etags) {
-                fileState[id].chunking.etags = [];
+            if (!handler._getFileState(id).chunking.etags) {
+                handler._getFileState(id).chunking.etags = [];
             }
-            fileState[id].chunking.etags.push({part: idxSent+1, etag: etag});
+            handler._getFileState(id).chunking.etags.push({part: idxSent+1, etag: etag});
 
             // Update the bytes loaded counter to reflect all bytes successfully transferred in the associated chunked request
-            fileState[id].loaded += chunkData.size;
+            handler._getFileState(id).loaded += chunkData.size;
 
-            maybePersistChunkedState(id);
+            handler._maybePersistChunkedState(id);
 
-            spec.onUploadChunkSuccess(id, internalApi.getChunkDataForCallback(chunkData), response, xhr);
+            spec.onUploadChunkSuccess(id, handler._getChunkDataForCallback(chunkData), response, xhr);
 
             // We might not be done with this file...
             maybeUploadNextChunk(id);
@@ -8519,35 +8771,31 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
     }
 
 
-    qq.extend(this, new qq.UploadHandlerXhrApi(
-        internalApi,
-        {fileState: fileState, chunking: chunkingPossible ? spec.chunking : null},
-        {onUpload: handleStartUploadSignal, onCancel: spec.onCancel, onUuidChanged: onUuidChanged, getName: getName,
-            getSize: getSize, getUuid: getUuid, log: log}
+    qq.extend(this, new qq.AbstractNonTraditionalUploadHandlerXhr({
+            options: {
+                namespace: "s3",
+                chunking: chunkingPossible ? spec.chunking : null,
+                resumeEnabled: resumeEnabled
+            },
+
+            proxy: {
+                onUpload: handleStartUploadSignal,
+                onCancel: spec.onCancel,
+                onUuidChanged: onUuidChanged,
+                getName: getName,
+                getSize: getSize,
+                getUuid: getUuid,
+                getEndpoint: endpointStore.get,
+                log: log
+            }
+        }
     ));
 
-
-    removeExpiredChunkingRecords();
-
-
-    // Base XHR API overrides
     qq.override(this, function(super_) {
         return {
-            add: function(id, fileOrBlobData) {
-                super_.add.apply(this, arguments);
-
-                if (resumeEnabled) {
-                    maybePrepareForResume(id);
-                }
-            },
-
-            getResumableFilesData: function() {
-                return getResumableFilesData();
-            },
-
             expunge: function(id) {
-                var uploadId = fileState[id].chunking && fileState[id].chunking.uploadId,
-                    existedInLocalStorage = maybeDeletePersistedChunkData(id);
+                var uploadId = handler._getFileState(id).chunking && handler._getFileState(id).chunking.uploadId,
+                    existedInLocalStorage = handler._maybeDeletePersistedChunkData(id);
 
                 if (uploadId !== undefined && existedInLocalStorage) {
                     abortMultipartRequester.send(id, uploadId);
@@ -8556,8 +8804,12 @@ qq.s3.UploadHandlerXhr = function(spec, proxy) {
                 super_.expunge(id);
             },
 
-            getThirdPartyFileId: function(id) {
-                return getActualKey(id);
+            _getLocalStorageId: function(id) {
+                var baseStorageId = super_._getLocalStorageId(id),
+                    endpoint = endpointStore.get(id),
+                    bucketName = qq.s3.util.getBucket(endpoint);
+
+                return baseStorageId + "-" + bucketName;
             }
         };
     });
@@ -8810,9 +9062,14 @@ qq.DragAndDrop = function(o) {
                 qq(dropArea).removeClass(options.classes.dropActive);
             },
             onDrop: function(e){
-                handleDataTransfer(e.dataTransfer, dropZone).done(function() {
-                    uploadDroppedFiles(droppedFiles, dropZone);
-                });
+                handleDataTransfer(e.dataTransfer, dropZone).then(
+                    function() {
+                        uploadDroppedFiles(droppedFiles, dropZone);
+                    },
+                    function() {
+                        options.callbacks.dropLog("Drop event DataTransfer parsing failed.  No files will be uploaded.", "error");
+                    }
+                );
             }
         });
 
@@ -9140,7 +9397,7 @@ qq.DeleteFileAjaxRequester = function(o) {
         return {};
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         validMethods: ["POST", "DELETE"],
         method: options.method,
         endpointStore: options.endpointStore,
@@ -9153,7 +9410,7 @@ qq.DeleteFileAjaxRequester = function(o) {
         onSend: options.onDelete,
         onComplete: options.onDeleteComplete,
         cors: options.cors
-    });
+    }));
 
 
     qq.extend(this, {
@@ -10272,11 +10529,11 @@ qq.SessionAjaxRequester = function(spec) {
         options.onComplete(response, !isError, xhrOrXdr);
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         validMethods: ["GET"],
         method: "GET",
         endpointStore: {
-            getEndpoint: function() {
+            get: function() {
                 return options.endpoint;
             }
         },
@@ -10284,24 +10541,185 @@ qq.SessionAjaxRequester = function(spec) {
         log: options.log,
         onComplete: onComplete,
         cors: options.cors
-    });
+    }));
 
 
     qq.extend(this, {
         queryServer: function() {
             var params = qq.extend({}, options.params);
 
-            // cache buster, particularly for IE & iOS
-            params.qqtimestamp = new Date().getTime();
-
             options.log("Session query request.");
 
             requester.initTransport("sessionRefresh")
                 .withParams(params)
+                .withCacheBuster()
                 .send();
         }
     });
 };
+
+/* globals qq */
+/**
+ * Module that handles support for existing forms.
+ *
+ * @param options Options passed from the integrator-supplied options related to form support.
+ * @param startUpload Callback to invoke when files "stored" should be uploaded.
+ * @param log Proxy for the logger
+ * @constructor
+ */
+qq.FormSupport = function(options, startUpload, log) {
+    "use strict";
+    var self  = this,
+        interceptSubmit = options.interceptSubmit,
+        formEl = options.element,
+        autoUpload = options.autoUpload;
+
+    // Available on the public API associated with this module.
+    qq.extend(this, {
+        // To be used by the caller to determine if the endpoint will be determined by some processing
+        // that occurs in this module, such as if the form has an action attribute.
+        // Ignore if `attachToForm === false`.
+        newEndpoint: null,
+
+        // To be used by the caller to determine if auto uploading should be allowed.
+        // Ignore if `attachToForm === false`.
+        newAutoUpload: autoUpload,
+
+        // true if a form was detected and is being tracked by this module
+        attachedToForm: false,
+
+        // Returns an object with names and values for all valid form elements associated with the attached form.
+        getFormInputsAsObject: function() {
+            /* jshint eqnull:true */
+            if (formEl == null) {
+                return null;
+            }
+
+            return self._form2Obj(formEl);
+        }
+    });
+
+    // If the form contains an action attribute, this should be the new upload endpoint.
+    function determineNewEndpoint(formEl) {
+        if (formEl.getAttribute("action")) {
+            self.newEndpoint = formEl.getAttribute("action");
+        }
+    }
+
+    // Return true only if the form is valid, or if we cannot make this determination.
+    // If the form is invalid, ensure invalid field(s) are highlighted in the UI.
+    function validateForm(formEl, nativeSubmit) {
+        if (formEl.checkValidity && !formEl.checkValidity()) {
+            log("Form did not pass validation checks - will not upload.", "error");
+            nativeSubmit();
+        }
+        else {
+            return true;
+        }
+    }
+
+    // Intercept form submit attempts, unless the integrator has told us not to do this.
+    function maybeUploadOnSubmit(formEl) {
+        var nativeSubmit = formEl.submit;
+
+        // Intercept and squelch submit events.
+        qq(formEl).attach("submit", function(event) {
+            event = event || window.event;
+
+            if (event.preventDefault) {
+                event.preventDefault();
+            }
+            else {
+                event.returnValue = false;
+            }
+
+            validateForm(formEl, nativeSubmit) && startUpload();
+        });
+
+        // The form's `submit()` function may be called instead (i.e. via jQuery.submit()).
+        // Intercept that too.
+        formEl.submit = function() {
+            validateForm(formEl, nativeSubmit) && startUpload();
+        };
+    }
+
+    // If the element value passed from the uploader is a string, assume it is an element ID - select it.
+    // The rest of the code in this module depends on this being an HTMLElement.
+    function determineFormEl(formEl) {
+        if (formEl) {
+            if (qq.isString(formEl)) {
+                formEl = document.getElementById(formEl);
+            }
+
+            if (formEl) {
+                log("Attaching to form element.");
+                determineNewEndpoint(formEl);
+                interceptSubmit && maybeUploadOnSubmit(formEl);
+            }
+        }
+
+        return formEl;
+    }
+
+    formEl = determineFormEl(formEl);
+    this.attachedToForm = !!formEl;
+};
+
+qq.extend(qq.FormSupport.prototype, {
+    // Converts all relevant form fields to key/value pairs.  This is meant to mimic the data a browser will
+    // construct from a given form when the form is submitted.
+    _form2Obj: function(form) {
+        "use strict";
+        var obj = {},
+            notIrrelevantType = function(type) {
+                var irrelevantTypes = [
+                    "button",
+                    "image",
+                    "reset",
+                    "submit"
+                ];
+
+                return qq.indexOf(irrelevantTypes, type.toLowerCase()) < 0;
+            },
+            radioOrCheckbox = function(type) {
+                return qq.indexOf(["checkbox", "radio"], type.toLowerCase()) >= 0;
+            },
+            ignoreValue = function(el) {
+                if (radioOrCheckbox(el.type) && !el.checked) {
+                    return true;
+                }
+
+                return el.disabled && el.type.toLowerCase() !== "hidden";
+            },
+            selectValue = function(select) {
+                var value = null;
+
+                qq.each(qq(select).children(), function(idx, child) {
+                    if (child.tagName.toLowerCase() === "option" && child.selected) {
+                        value = child.value;
+                        return false;
+                    }
+                });
+
+                return value;
+            };
+
+        qq.each(form.elements, function(idx, el) {
+            if (qq.isInput(el, true) && notIrrelevantType(el.type) && !ignoreValue(el)) {
+                obj[el.name] = el.value;
+            }
+            else if (el.tagName.toLowerCase() === "select" && !ignoreValue(el)) {
+                var value = selectValue(el);
+
+                if (value !== null) {
+                    obj[el.name] = value;
+                }
+            }
+        });
+
+        return obj;
+    }
+});
 
 /*globals qq */
 // Base handler for UI (FineUploader mode) events.

@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 4.2.2
+* Version: 4.3.0
 *
 * Homepage: http://fineuploader.com
 *
@@ -292,17 +292,27 @@ var qq = function(element) {
         return qq.isFile(maybeFileOrInput) || qq.isInput(maybeFileOrInput);
     };
 
-    qq.isInput = function(maybeInput) {
+    qq.isInput = function(maybeInput, notFile) {
+        var evaluateType = function(type) {
+            var normalizedType = type.toLowerCase();
+
+            if (notFile) {
+                return normalizedType !== "file";
+            }
+
+            return normalizedType === "file";
+        };
+
         if (window.HTMLInputElement) {
             if (Object.prototype.toString.call(maybeInput) === "[object HTMLInputElement]") {
-                if (maybeInput.type && maybeInput.type.toLowerCase() === "file") {
+                if (maybeInput.type && evaluateType(maybeInput.type)) {
                     return true;
                 }
             }
         }
         if (maybeInput.tagName) {
             if (maybeInput.tagName.toLowerCase() === "input") {
-                if (maybeInput.type && maybeInput.type.toLowerCase() === "file") {
+                if (maybeInput.type && evaluateType(maybeInput.type)) {
                     return true;
                 }
             }
@@ -848,14 +858,14 @@ var qq = function(element) {
     "use strict";
 
     qq.Error = function(message) {
-        this.message = message;
+        this.message = "[Fine Uploader " + qq.version + "] " + message;
     };
 
     qq.Error.prototype = new Error();
 }());
 
 /*global qq */
-qq.version="4.2.2";
+qq.version="4.3.0";
 
 /* globals qq */
 qq.supportedFeatures = (function () {
@@ -1410,43 +1420,25 @@ qq.status = {
     qq.basePublicApi = {
         log: function(str, level) {
             if (this._options.debug && (!level || level === "info")) {
-                qq.log("[FineUploader " + qq.version + "] " + str);
+                qq.log("[Fine Uploader " + qq.version + "] " + str);
             }
             else if (level && level !== "info") {
-                qq.log("[FineUploader " + qq.version + "] " + str, level);
+                qq.log("[Fine Uploader " + qq.version + "] " + str, level);
 
             }
         },
 
         setParams: function(params, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.request.params = params;
-            }
-            else {
-                this._paramsStore.setParams(params, id);
-            }
+            this._paramsStore.set(params, id);
         },
 
         setDeleteFileParams: function(params, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.deleteFile.params = params;
-            }
-            else {
-                this._deleteFileParamsStore.setParams(params, id);
-            }
+            this._deleteFileParamsStore.set(params, id);
         },
 
         // Re-sets the default endpoint, an endpoint for a specific file, or an endpoint for a specific button
         setEndpoint: function(endpoint, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.request.endpoint = endpoint;
-            }
-            else {
-                this._endpointStore.setEndpoint(endpoint, id);
-            }
+            this._endpointStore.set(endpoint, id);
         },
 
         getInProgress: function() {
@@ -1524,6 +1516,9 @@ qq.status = {
 
             this._pasteHandler && this._pasteHandler.reset();
             this._options.session.refreshOnReset && this._refreshSessionData();
+
+            this._succeededSinceLastAllComplete = [];
+            this._failedSinceLastAllComplete = [];
         },
 
         addFiles: function(filesOrInputs, params, endpoint) {
@@ -1619,17 +1614,11 @@ qq.status = {
         },
 
         deleteFile: function(id) {
-            this._onSubmitDelete(id);
+            return this._onSubmitDelete(id);
         },
 
         setDeleteFileEndpoint: function(endpoint, id) {
-            /*jshint eqeqeq: true, eqnull: true*/
-            if (id == null) {
-                this._options.deleteFile.endpoint = endpoint;
-            }
-            else {
-                this._deleteFileEndpointStore.setEndpoint(endpoint, id);
-            }
+            this._deleteFileEndpointStore.set(endpoint, id);
         },
 
         doesExist: function(fileOrBlobId) {
@@ -1732,6 +1721,26 @@ qq.status = {
      * Defines the private (internal) API for FineUploaderBasic mode.
      */
     qq.basePrivateApi = {
+        _initFormSupportAndParams: function() {
+            this._formSupport = qq.FormSupport && new qq.FormSupport(
+                this._options.form, qq.bind(this.uploadStoredFiles, this), qq.bind(this.log, this)
+            );
+
+            if (this._formSupport && this._formSupport.attachedToForm) {
+                this._paramsStore = this._createStore(
+                    this._options.request.params,  this._formSupport.getFormInputsAsObject
+                );
+
+                this._options.autoUpload = this._formSupport.newAutoUpload;
+                if (this._formSupport.newEndpoint) {
+                    this._options.request.endpoint = this._formSupport.newEndpoint;
+                }
+            }
+            else {
+                this._paramsStore = this._createStore(this._options.request.params);
+            }
+        },
+
         _uploadFile: function(id) {
             if (!this._handler.upload(id)) {
                 this._uploadData.setStatus(id, qq.status.QUEUED);
@@ -1803,10 +1812,27 @@ qq.status = {
 
             id = this._uploadData.addFile(uuid, name, size);
             this._handler.add(id, file);
+            this._trackButton(id);
 
             this._netUploadedOrQueued++;
 
             newFileWrapperList.push({id: id, file: file});
+        },
+
+        // Maps a file with the button that was used to select it.
+        _trackButton: function(id) {
+            var buttonId;
+
+            if (qq.supportedFeatures.ajaxUploading) {
+                buttonId = this._handler.getFile(id).qqButtonId;
+            }
+            else {
+                buttonId = this._getButtonId(this._handler.getInput(id));
+            }
+
+            if (buttonId) {
+                this._buttonIdsForFileIds[id] = buttonId;
+            }
         },
 
         // Creates an internal object that tracks various properties of each extra button,
@@ -2132,6 +2158,7 @@ qq.status = {
                 onStatusChange: function(id, oldStatus, newStatus) {
                     self._onUploadStatusChange(id, oldStatus, newStatus);
                     self._options.callbacks.onStatusChange(id, oldStatus, newStatus);
+                    self._maybeAllComplete(id, newStatus);
                 }
             });
         },
@@ -2201,6 +2228,41 @@ qq.status = {
             return result.success ? true : false;
         },
 
+        _maybeAllComplete: function(id, status) {
+            var self = this,
+                notFinished = this._uploadData.retrieve({
+                status: [
+                    qq.status.UPLOADING,
+                    qq.status.UPLOAD_RETRYING,
+                    qq.status.QUEUED,
+                    qq.status.SUBMITTING,
+                    qq.status.SUBMITTED,
+                    qq.status.PAUSED,
+                ]
+            }).length;
+
+            if (status === qq.status.UPLOAD_SUCCESSFUL) {
+                this._succeededSinceLastAllComplete.push(id);
+            }
+            else if (status === qq.status.UPLOAD_FAILED) {
+                this._failedSinceLastAllComplete.push(id);
+            }
+
+            if (notFinished === 0 &&
+                (this._succeededSinceLastAllComplete.length || this._failedSinceLastAllComplete.length)) {
+                // Attempt to ensure onAllComplete is not invoked before other callbacks, such as onCancel & onComplete
+                setTimeout(function() {
+                    self._options.callbacks.onAllComplete(
+                        qq.extend([], self._succeededSinceLastAllComplete),
+                        qq.extend([], self._failedSinceLastAllComplete)
+                    );
+
+                    self._succeededSinceLastAllComplete = [];
+                    self._failedSinceLastAllComplete = [];
+                }, 0);
+            }
+        },
+
         _onCancel: function(id, name) {
             this._netUploadedOrQueued--;
 
@@ -2243,13 +2305,14 @@ qq.status = {
             }
 
             if (this._isDeletePossible()) {
-                return this._handleCheckedCallback({
+                this._handleCheckedCallback({
                     name: "onSubmitDelete",
                     callback: qq.bind(this._options.callbacks.onSubmitDelete, this, id),
                     onSuccess: adjustedOnSuccessCallback ||
                         qq.bind(this._deleteHandler.sendDelete, this, id, uuid, additionalMandatedParams),
                     identifier: id
                 });
+                return true;
             }
             else {
                 this.log("Delete request ignored for ID " + id + ", delete feature is disabled or request not possible " +
@@ -2445,6 +2508,11 @@ qq.status = {
         },
 
         _prepareItemsForUpload: function(items, params, endpoint) {
+            if (items.length === 0) {
+                this._itemError("noFilesError");
+                return;
+            }
+
             var validationDescriptors = this._getValidationDescriptors(items),
                 buttonId = this._getButtonId(items[0].file),
                 button = this._getButton(buttonId);
@@ -2479,19 +2547,6 @@ qq.status = {
         },
 
         _onSubmitCallbackSuccess: function(id, name) {
-            var buttonId;
-
-            if (qq.supportedFeatures.ajaxUploading) {
-                buttonId = this._handler.getFile(id).qqButtonId;
-            }
-            else {
-                buttonId = this._getButtonId(this._handler.getInput(id));
-            }
-
-            if (buttonId) {
-                this._buttonIdsForFileIds[id] = buttonId;
-            }
-
             this._onSubmit.apply(this, arguments);
             this._uploadData.setStatus(id, qq.status.SUBMITTED);
             this._onSubmitted.apply(this, arguments);
@@ -2842,65 +2897,62 @@ qq.status = {
             return fileDescriptors;
         },
 
-        _createParamsStore: function(type) {
-            var paramsStore = {},
-                self = this;
+        _createStore: function(initialValue, readOnlyValues) {
+            var store = {},
+                catchall = initialValue,
+                copy = function(orig) {
+                    if (qq.isObject(orig)) {
+                        return qq.extend({}, orig);
+                    }
+                    return orig;
+                },
+                getReadOnlyValues = function() {
+                    if (qq.isFunction(readOnlyValues)) {
+                        return readOnlyValues();
+                    }
+                    return readOnlyValues;
+                },
+                includeReadOnlyValues = function(existing) {
+                    if (readOnlyValues && qq.isObject(existing)) {
+                        qq.extend(existing, getReadOnlyValues());
+                    }
+                };
 
             return {
-                setParams: function(params, id) {
-                    var paramsCopy = {};
-                    qq.extend(paramsCopy, params);
-                    paramsStore[id] = paramsCopy;
-                },
-
-                getParams: function(id) {
+                set: function(val, id) {
                     /*jshint eqeqeq: true, eqnull: true*/
-                    var paramsCopy = {};
-
-                    if (id != null && paramsStore[id]) {
-                        qq.extend(paramsCopy, paramsStore[id]);
+                    if (id == null) {
+                        store = {};
+                        catchall = copy(val);
                     }
                     else {
-                        qq.extend(paramsCopy, self._options[type].params);
+                        store[id] = copy(val);
                     }
-
-                    return paramsCopy;
                 },
 
-                remove: function(fileId) {
-                    return delete paramsStore[fileId];
-                },
+                get: function(id) {
+                    var values;
 
-                reset: function() {
-                    paramsStore = {};
-                }
-            };
-        },
-
-        _createEndpointStore: function(type) {
-            var endpointStore = {},
-            self = this;
-
-            return {
-                setEndpoint: function(endpoint, id) {
-                    endpointStore[id] = endpoint;
-                },
-
-                getEndpoint: function(id) {
                     /*jshint eqeqeq: true, eqnull: true*/
-                    if (id != null && endpointStore[id]) {
-                        return endpointStore[id];
+                    if (id != null && store[id]) {
+                        values = store[id];
+                    }
+                    else {
+                        values = catchall;
                     }
 
-                    return self._options[type].endpoint;
+                    includeReadOnlyValues(values);
+
+                    return copy(values);
                 },
 
                 remove: function(fileId) {
-                    return delete endpointStore[fileId];
+                    return delete store[fileId];
                 },
 
                 reset: function() {
-                    endpointStore = {};
+                    store = {};
+                    catchall = initialValue;
                 }
             };
         },
@@ -2947,7 +2999,6 @@ qq.status = {
             var extraButtonSpec = this._extraButtonSpecs[buttonId];
 
             return extraButtonSpec ? extraButtonSpec.validation : this._options.validation;
-
         }
     };
 }());
@@ -2997,6 +3048,7 @@ qq.status = {
                 onSubmit: function(id, name){},
                 onSubmitted: function(id, name){},
                 onComplete: function(id, name, responseJSON, maybeXhr){},
+                onAllComplete: function(successful, failed) {},
                 onCancel: function(id, name){},
                 onUpload: function(id, name){},
                 onUploadChunk: function(id, name, chunkData){},
@@ -3121,6 +3173,18 @@ qq.status = {
                 params: {},
                 customHeaders: {},
                 refreshOnReset: true
+            },
+
+            // Send parameters associated with an existing form along with the files
+            form: {
+                // Element ID, HTMLElement, or null
+                element: "qq-form",
+
+                // Overrides the base `autoUpload`, unless `element` is null.
+                autoUpload: false,
+
+                // true = upload files on form submission (and squelch submit event)
+                interceptSubmit: true
             }
         };
 
@@ -3144,11 +3208,12 @@ qq.status = {
         this._netUploaded = 0;
         this._uploadData = this._createUploadDataTracker();
 
-        this._paramsStore = this._createParamsStore("request");
-        this._deleteFileParamsStore = this._createParamsStore("deleteFile");
+        this._initFormSupportAndParams();
 
-        this._endpointStore = this._createEndpointStore("request");
-        this._deleteFileEndpointStore = this._createEndpointStore("deleteFile");
+        this._deleteFileParamsStore = this._createStore(this._options.deleteFile.params);
+
+        this._endpointStore = this._createStore(this._options.request.endpoint);
+        this._deleteFileEndpointStore = this._createStore(this._options.deleteFile.endpoint);
 
         this._handler = this._createUploadHandler();
 
@@ -3175,6 +3240,9 @@ qq.status = {
 
         this._imageGenerator = qq.ImageGenerator && new qq.ImageGenerator(qq.bind(this.log, this));
         this._refreshSessionData();
+
+        this._succeededSinceLastAllComplete = [];
+        this._failedSinceLastAllComplete = [];
     };
 
     // Define the private & public API methods.
@@ -3189,7 +3257,7 @@ qq.AjaxRequester = function (o) {
 
     var log, shouldParamsBeInQueryString,
         queue = [],
-        requestData = [],
+        requestData = {},
         options = {
             validMethods: ["POST"],
             method: "POST",
@@ -3211,7 +3279,8 @@ qq.AjaxRequester = function (o) {
             },
             log: function (str, level) {},
             onSend: function (id) {},
-            onComplete: function (id, xhrOrXdr, isError) {}
+            onComplete: function (id, xhrOrXdr, isError) {},
+            onProgress: null
         };
 
     qq.extend(options, o);
@@ -3320,8 +3389,8 @@ qq.AjaxRequester = function (o) {
             mandatedParams = options.mandatedParams,
             params;
 
-        if (options.paramsStore.getParams) {
-            params = options.paramsStore.getParams(id);
+        if (options.paramsStore.get) {
+            params = options.paramsStore.get(id);
         }
 
         if (onDemandParams) {
@@ -3361,6 +3430,9 @@ qq.AjaxRequester = function (o) {
             xhr.onreadystatechange = getXhrReadyStateChangeHandler(id);
         }
 
+
+        registerForUploadProgress(id);
+
         // The last parameter is assumed to be ignored if we are actually using `XDomainRequest`.
         xhr.open(method, url, true);
 
@@ -3380,19 +3452,21 @@ qq.AjaxRequester = function (o) {
         else if (shouldParamsBeInQueryString || !params) {
             xhr.send();
         }
-        else if (params && options.contentType.toLowerCase().indexOf("application/x-www-form-urlencoded") >= 0) {
+        else if (params && options.contentType && options.contentType.toLowerCase().indexOf("application/x-www-form-urlencoded") >= 0) {
             xhr.send(qq.obj2url(params, ""));
         }
-        else if (params && options.contentType.toLowerCase().indexOf("application/json") >= 0) {
+        else if (params && options.contentType && options.contentType.toLowerCase().indexOf("application/json") >= 0) {
             xhr.send(JSON.stringify(params));
         }
         else {
             xhr.send(params);
         }
+
+        return xhr;
     }
 
     function createUrl(id, params) {
-        var endpoint = options.endpointStore.getEndpoint(id),
+        var endpoint = options.endpointStore.get(id),
             addToPath = requestData[id].addToPath;
 
         /*jshint -W116,-W041 */
@@ -3416,6 +3490,18 @@ qq.AjaxRequester = function (o) {
                 onComplete(id);
             }
         };
+    }
+
+    function registerForUploadProgress(id) {
+        var onProgress = options.onProgress;
+
+        if (onProgress) {
+            getXhrOrXdr(id).upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    onProgress(id, e.loaded, e.total);
+                }
+            };
+        }
     }
 
     // This will be called by IE to indicate **success** for an associated
@@ -3459,7 +3545,7 @@ qq.AjaxRequester = function (o) {
                 xhr.setRequestHeader("Content-Type", options.contentType);
             }
 
-            qq.extend(allHeaders, customHeaders);
+            qq.extend(allHeaders, qq.isFunction(customHeaders) ? customHeaders(id) : customHeaders);
             qq.extend(allHeaders, onDemandHeaders);
 
             qq.each(allHeaders, function (name, val) {
@@ -3484,7 +3570,7 @@ qq.AjaxRequester = function (o) {
 
         // if too many active connections, wait...
         if (len <= options.maxConnections) {
-            sendRequest(id);
+            return sendRequest(id);
         }
     }
 
@@ -3494,7 +3580,7 @@ qq.AjaxRequester = function (o) {
     qq.extend(this, {
         // Start the process of sending the request.  The ID refers to the file associated with the request.
         initTransport: function(id) {
-            var path, params, headers, payload;
+            var path, params, headers, payload, cacheBuster;
 
             return {
                 // Optionally specify the end of the endpoint path for the request.
@@ -3524,11 +3610,25 @@ qq.AjaxRequester = function (o) {
                     return this;
                 },
 
+                // Appends a cache buster (timestamp) to the request URL as a query parameter (only if GET or DELETE)
+                withCacheBuster: function() {
+                    cacheBuster = true;
+                    return this;
+                },
+
                 // Send the constructed request.
                 send: function() {
-                    prepareToSend(id, path, params, headers, payload);
+                    if (cacheBuster && qq.indexOf(["GET", "DELETE"], options.method) >= 0) {
+                        params.qqtimestamp = new Date().getTime();
+                    }
+
+                    return prepareToSend(id, path, params, headers, payload);
                 }
             };
+        },
+
+        canceled: function(id) {
+            dequeue(id);
         }
     });
 };
@@ -3772,22 +3872,21 @@ qq.UploadHandler = function(o, namespace) {
  * Common APIs exposed to creators of upload via form/iframe handlers.  This is reused and possibly overridden
  * in some cases by specific form upload handlers.
  *
- * @param internalApi Object that will be filled with internal API methods
- * @param spec Options/static values used to configure this handler
- * @param proxy Callbacks & methods used to query for or push out data/changes
  * @constructor
  */
-qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
+qq.AbstractUploadHandlerForm = function(spec) {
     "use strict";
 
-    var formHandlerInstanceId = qq.getUniqueId(),
+    var options = spec.options,
+        handler = this,
+        proxy = spec.proxy,
+        formHandlerInstanceId = qq.getUniqueId(),
         onloadCallbacks = {},
         detachLoadEvents = {},
         postMessageCallbackTimers = {},
-        publicApi = this,
-        isCors = spec.isCors,
-        fileState = spec.fileState,
-        inputName = spec.inputName,
+        isCors = options.isCors,
+        fileState = {},
+        inputName = options.inputName,
         onCancel = proxy.onCancel,
         onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
@@ -3814,7 +3913,7 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
             corsMessageReceiver.stopReceivingMessages(id);
         }
 
-        var iframe = document.getElementById(internalApi.getIframeName(id));
+        var iframe = document.getElementById(handler._getIframeName(id));
         if (iframe) {
             // To cancel request set src to something else.  We use src="javascript:false;"
             // because it doesn't trigger ie6 prompt on https
@@ -3859,7 +3958,7 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
         corsMessageReceiver.receiveMessage(iframeName, function(message) {
             log("Received the following window message: '" + message + "'");
             var fileId = getFileIdForIframeName(iframeName),
-                response = internalApi.parseJsonResponse(fileId, message),
+                response = handler._parseJsonResponse(fileId, message),
                 uuid = response.uuid,
                 onloadCallback;
 
@@ -3868,7 +3967,7 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
                 clearTimeout(postMessageCallbackTimers[iframeName]);
                 delete postMessageCallbackTimers[iframeName];
 
-                internalApi.detachLoadEvent(iframeName);
+                handler._detachLoadEvent(iframeName);
 
                 onloadCallback = onloadCallbacks[uuid];
 
@@ -3908,150 +4007,6 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
         return iframeName.split("_")[0];
     }
 
-
-// INTERNAL API
-
-    qq.extend(internalApi, {
-        /**
-         * @param fileId ID of the associated file
-         * @returns {string} The `document`-unique name of the iframe
-         */
-        getIframeName: function(fileId) {
-            return fileId + "_" + formHandlerInstanceId;
-        },
-
-        /**
-         * Creates an iframe with a specific document-unique name.
-         *
-         * @param id ID of the associated file
-         * @returns {HTMLIFrameElement}
-         */
-        createIframe: function(id) {
-            var iframeName = internalApi.getIframeName(id);
-
-            return initIframeForUpload(iframeName);
-        },
-
-        /**
-         * @param id ID of the associated file
-         * @param innerHtmlOrMessage JSON message
-         * @returns {*} The parsed response, or an empty object if the response could not be parsed
-         */
-        parseJsonResponse: function(id, innerHtmlOrMessage) {
-            var response;
-
-            try {
-                response = qq.parseJson(innerHtmlOrMessage);
-
-                if (response.newUuid !== undefined) {
-                    onUuidChanged(id, response.newUuid);
-                }
-            }
-            catch(error) {
-                log("Error when attempting to parse iframe upload response (" + error.message + ")", "error");
-                response = {};
-            }
-
-            return response;
-        },
-
-        /**
-         * Generates a form element and appends it to the `document`.  When the form is submitted, a specific iframe is targeted.
-         * The name of the iframe is passed in as a property of the spec parameter, and must be unique in the `document`.  Note
-         * that the form is hidden from view.
-         *
-         * @param spec An object containing various properties to be used when constructing the form.  Required properties are
-         * currently: `method`, `endpoint`, `params`, `paramsInBody`, and `targetName`.
-         * @returns {HTMLFormElement} The created form
-         */
-        initFormForUpload: function(spec) {
-            var method = spec.method,
-                endpoint = spec.endpoint,
-                params = spec.params,
-                paramsInBody = spec.paramsInBody,
-                targetName = spec.targetName,
-                form = qq.toElement("<form method='" + method + "' enctype='multipart/form-data'></form>"),
-                url = endpoint;
-
-            if (paramsInBody) {
-                qq.obj2Inputs(params, form);
-            }
-            else {
-                url = qq.obj2url(params, endpoint);
-            }
-
-            form.setAttribute("action", url);
-            form.setAttribute("target", targetName);
-            form.style.display = "none";
-            document.body.appendChild(form);
-
-            return form;
-        },
-
-        /**
-         * This function either delegates to a more specific message handler if CORS is involved,
-         * or simply registers a callback when the iframe has been loaded that invokes the passed callback
-         * after determining if the content of the iframe is accessible.
-         *
-         * @param iframe Associated iframe
-         * @param callback Callback to invoke after we have determined if the iframe content is accessible.
-         */
-        attachLoadEvent: function(iframe, callback) {
-            /*jslint eqeq: true*/
-            var responseDescriptor;
-
-            if (isCors) {
-                registerPostMessageCallback(iframe, callback);
-            }
-            else {
-                detachLoadEvents[iframe.id] = qq(iframe).attach("load", function(){
-                    log("Received response for " + iframe.id);
-
-                    // when we remove iframe from dom
-                    // the request stops, but in IE load
-                    // event fires
-                    if (!iframe.parentNode){
-                        return;
-                    }
-
-                    try {
-                        // fixing Opera 10.53
-                        if (iframe.contentDocument &&
-                            iframe.contentDocument.body &&
-                            iframe.contentDocument.body.innerHTML == "false"){
-                            // In Opera event is fired second time
-                            // when body.innerHTML changed from false
-                            // to server response approx. after 1 sec
-                            // when we upload file with iframe
-                            return;
-                        }
-                    }
-                    catch (error) {
-                        //IE may throw an "access is denied" error when attempting to access contentDocument on the iframe in some cases
-                        log("Error when attempting to access iframe during handling of upload response (" + error.message + ")", "error");
-                        responseDescriptor = {success: false};
-                    }
-
-                    callback(responseDescriptor);
-                });
-            }
-        },
-
-        /**
-         * Called when we are no longer interested in being notified when an iframe has loaded.
-         *
-         * @param id Associated file ID
-         */
-        detachLoadEvent: function(id) {
-            if (detachLoadEvents[id] !== undefined) {
-                detachLoadEvents[id]();
-                delete detachLoadEvents[id];
-            }
-        }
-    });
-
-
-// PUBLIC API
 
     qq.extend(this, {
         add: function(id, fileInput) {
@@ -4100,6 +4055,147 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
 
         upload: function(id) {
             // implementation-specific
+        },
+
+        /**
+         * @param fileId ID of the associated file
+         * @returns {string} The `document`-unique name of the iframe
+         */
+        _getIframeName: function(fileId) {
+            return fileId + "_" + formHandlerInstanceId;
+        },
+
+        /**
+         * Creates an iframe with a specific document-unique name.
+         *
+         * @param id ID of the associated file
+         * @returns {HTMLIFrameElement}
+         */
+        _createIframe: function(id) {
+            var iframeName = handler._getIframeName(id);
+
+            return initIframeForUpload(iframeName);
+        },
+
+        /**
+         * @param id ID of the associated file
+         * @param innerHtmlOrMessage JSON message
+         * @returns {*} The parsed response, or an empty object if the response could not be parsed
+         */
+        _parseJsonResponse: function(id, innerHtmlOrMessage) {
+            var response;
+
+            try {
+                response = qq.parseJson(innerHtmlOrMessage);
+
+                if (response.newUuid !== undefined) {
+                    onUuidChanged(id, response.newUuid);
+                }
+            }
+            catch(error) {
+                log("Error when attempting to parse iframe upload response (" + error.message + ")", "error");
+                response = {};
+            }
+
+            return response;
+        },
+
+        /**
+         * Generates a form element and appends it to the `document`.  When the form is submitted, a specific iframe is targeted.
+         * The name of the iframe is passed in as a property of the spec parameter, and must be unique in the `document`.  Note
+         * that the form is hidden from view.
+         *
+         * @param spec An object containing various properties to be used when constructing the form.  Required properties are
+         * currently: `method`, `endpoint`, `params`, `paramsInBody`, and `targetName`.
+         * @returns {HTMLFormElement} The created form
+         */
+        _initFormForUpload: function(spec) {
+            var method = spec.method,
+                endpoint = spec.endpoint,
+                params = spec.params,
+                paramsInBody = spec.paramsInBody,
+                targetName = spec.targetName,
+                form = qq.toElement("<form method='" + method + "' enctype='multipart/form-data'></form>"),
+                url = endpoint;
+
+            if (paramsInBody) {
+                qq.obj2Inputs(params, form);
+            }
+            else {
+                url = qq.obj2url(params, endpoint);
+            }
+
+            form.setAttribute("action", url);
+            form.setAttribute("target", targetName);
+            form.style.display = "none";
+            document.body.appendChild(form);
+
+            return form;
+        },
+
+        /**
+         * This function either delegates to a more specific message handler if CORS is involved,
+         * or simply registers a callback when the iframe has been loaded that invokes the passed callback
+         * after determining if the content of the iframe is accessible.
+         *
+         * @param iframe Associated iframe
+         * @param callback Callback to invoke after we have determined if the iframe content is accessible.
+         */
+        _attachLoadEvent: function(iframe, callback) {
+            /*jslint eqeq: true*/
+            var responseDescriptor;
+
+            if (isCors) {
+                registerPostMessageCallback(iframe, callback);
+            }
+            else {
+                detachLoadEvents[iframe.id] = qq(iframe).attach("load", function(){
+                    log("Received response for " + iframe.id);
+
+                    // when we remove iframe from dom
+                    // the request stops, but in IE load
+                    // event fires
+                    if (!iframe.parentNode){
+                        return;
+                    }
+
+                    try {
+                        // fixing Opera 10.53
+                        if (iframe.contentDocument &&
+                            iframe.contentDocument.body &&
+                            iframe.contentDocument.body.innerHTML == "false"){
+                            // In Opera event is fired second time
+                            // when body.innerHTML changed from false
+                            // to server response approx. after 1 sec
+                            // when we upload file with iframe
+                            return;
+                        }
+                    }
+                    catch (error) {
+                        //IE may throw an "access is denied" error when attempting to access contentDocument on the iframe in some cases
+                        log("Error when attempting to access iframe during handling of upload response (" + error.message + ")", "error");
+                        responseDescriptor = {success: false};
+                    }
+
+                    callback(responseDescriptor);
+                });
+            }
+        },
+
+        /**
+         * Called when we are no longer interested in being notified when an iframe has loaded.
+         *
+         * @param id Associated file ID
+         */
+        _detachLoadEvent: function(id) {
+            if (detachLoadEvents[id] !== undefined) {
+                detachLoadEvents[id]();
+                delete detachLoadEvents[id];
+            }
+        },
+
+        _getFileState: function(id) {
+            return fileState[id];
         }
     });
 };
@@ -4109,20 +4205,18 @@ qq.UploadHandlerFormApi = function(internalApi, spec, proxy) {
  * Common API exposed to creators of XHR handlers.  This is reused and possibly overriding in some cases by specific
  * XHR upload handlers.
  *
- * @param internalApi Object that will be filled with internal API methods
- * @param spec Options/static values used to configure this handler
- * @param proxy Callbacks & methods used to query for or push out data/changes
  * @constructor
  */
-qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
+qq.AbstractUploadHandlerXhr = function(spec) {
     "use strict";
 
     var publicApi = this,
-        fileState = spec.fileState,
-        chunking = spec.chunking,
+        options = spec.options,
+        proxy = spec.proxy,
+        fileState = {},
+        chunking = options.chunking,
         onUpload = proxy.onUpload,
         onCancel = proxy.onCancel,
-        onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
         getSize = proxy.getSize,
         log = proxy.log;
@@ -4140,61 +4234,15 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
         }
     }
 
-    qq.extend(internalApi, {
-        /**
-         * Creates an XHR instance for this file and stores it in the fileState.
-         *
-         * @param id File ID
-         * @returns {XMLHttpRequest}
-         */
-        createXhr: function(id) {
-            var xhr = qq.createXhrInstance();
+    function abort(id) {
+        var xhr = fileState[id].xhr,
+            ajaxRequester = fileState[id].currentAjaxRequester;
 
-            fileState[id].xhr = xhr;
-
-            return xhr;
-        },
-
-        /**
-         * @param id ID of the associated file
-         * @returns {number} Number of parts this file can be divided into, or undefined if chunking is not supported in this UA
-         */
-        getTotalChunks: function(id) {
-            if (chunking) {
-                var fileSize = getSize(id),
-                    chunkSize = chunking.partSize;
-
-                return Math.ceil(fileSize / chunkSize);
-            }
-        },
-
-        getChunkData: function(id, chunkIndex) {
-            var chunkSize = chunking.partSize,
-                fileSize = getSize(id),
-                fileOrBlob = publicApi.getFile(id),
-                startBytes = chunkSize * chunkIndex,
-                endBytes = startBytes+chunkSize >= fileSize ? fileSize : startBytes+chunkSize,
-                totalChunks = internalApi.getTotalChunks(id);
-
-            return {
-                part: chunkIndex,
-                start: startBytes,
-                end: endBytes,
-                count: totalChunks,
-                blob: getChunk(fileOrBlob, startBytes, endBytes),
-                size: endBytes - startBytes
-            };
-        },
-
-        getChunkDataForCallback: function(chunkData) {
-            return {
-                partIndex: chunkData.part,
-                startByte: chunkData.start + 1,
-                endByte: chunkData.end,
-                totalParts: chunkData.count
-            };
-        }
-    });
+        xhr.onreadystatechange = null;
+        xhr.upload.onprogress = null;
+        xhr.abort();
+        ajaxRequester && ajaxRequester.canceled && ajaxRequester.canceled(id);
+    }
 
     qq.extend(this, {
         /**
@@ -4229,10 +4277,7 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
         expunge: function(id) {
             var xhr = fileState[id].xhr;
 
-            if (xhr) {
-                xhr.onreadystatechange = null;
-                xhr.abort();
-            }
+            xhr && abort(id);
 
             delete fileState[id];
         },
@@ -4250,10 +4295,12 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
 
             if (onCancelRetVal instanceof qq.Promise) {
                 return onCancelRetVal.then(function() {
+                    fileState[id].canceled = true;
                     this.expunge(id);
                 });
             }
             else if (onCancelRetVal !== false) {
+                fileState[id].canceled = true;
                 this.expunge(id);
                 return true;
             }
@@ -4267,9 +4314,80 @@ qq.UploadHandlerXhrApi = function(internalApi, spec, proxy) {
             if(xhr) {
                 log(qq.format("Aborting XHR upload for {} '{}' due to pause instruction.", id, getName(id)));
                 fileState[id].paused = true;
-                xhr.abort();
+                abort(id);
                 return true;
             }
+        },
+
+        /**
+         * Creates an XHR instance for this file and stores it in the fileState.
+         *
+         * @param id File ID
+         * @returns {XMLHttpRequest}
+         */
+        _createXhr: function(id) {
+            return this._registerXhr(id, qq.createXhrInstance());
+        },
+
+        /**
+         * Registers an XHR transport instance created elsewhere.
+         *
+         * @param id ID of the associated file
+         * @param xhr XMLHttpRequest object instance
+         * @returns {XMLHttpRequest}
+         */
+        _registerXhr: function(id, xhr, ajaxRequester) {
+            fileState[id].xhr = xhr;
+            fileState[id].currentAjaxRequester = ajaxRequester;
+            return xhr;
+        },
+
+        _getMimeType: function(id) {
+            return publicApi.getFile(id).type;
+        },
+
+        /**
+         * @param id ID of the associated file
+         * @returns {number} Number of parts this file can be divided into, or undefined if chunking is not supported in this UA
+         */
+        _getTotalChunks: function(id) {
+            if (chunking) {
+                var fileSize = getSize(id),
+                    chunkSize = chunking.partSize;
+
+                return Math.ceil(fileSize / chunkSize);
+            }
+        },
+
+        _getChunkData: function(id, chunkIndex) {
+            var chunkSize = chunking.partSize,
+                fileSize = getSize(id),
+                fileOrBlob = publicApi.getFile(id),
+                startBytes = chunkSize * chunkIndex,
+                endBytes = startBytes+chunkSize >= fileSize ? fileSize : startBytes+chunkSize,
+                totalChunks = this._getTotalChunks(id);
+
+            return {
+                part: chunkIndex,
+                start: startBytes,
+                end: endBytes,
+                count: totalChunks,
+                blob: getChunk(fileOrBlob, startBytes, endBytes),
+                size: endBytes - startBytes
+            };
+        },
+
+        _getChunkDataForCallback: function(chunkData) {
+            return {
+                partIndex: chunkData.part,
+                startByte: chunkData.start + 1,
+                endByte: chunkData.end,
+                totalParts: chunkData.count
+            };
+        },
+
+        _getFileState: function(id) {
+            return fileState[id];
         }
     });
 };
@@ -4445,7 +4563,7 @@ qq.WindowReceiveMessage = function(o) {
                             file.qqDropTarget = targetEl;
                         });
 
-                        if (files) {
+                        if (files.length) {
                             self.addFiles(files, null, null);
                         }
                     },
@@ -5866,14 +5984,13 @@ qq.Templating = function(spec) {
 qq.UploadHandlerForm = function(options, proxy) {
     "use strict";
 
-    var fileState = [],
+    var handler = this,
         uploadCompleteCallback = proxy.onUploadComplete,
         onUuidChanged = proxy.onUuidChanged,
         getName = proxy.getName,
         getUuid = proxy.getUuid,
         uploadComplete = uploadCompleteCallback,
-        log = proxy.log,
-        internalApi = {};
+        log = proxy.log;
 
 
     /**
@@ -5897,7 +6014,7 @@ qq.UploadHandlerForm = function(options, proxy) {
                 innerHtml = doc.body.firstChild.firstChild.nodeValue;
             }
 
-            response = internalApi.parseJsonResponse(id, innerHtml);
+            response = handler._parseJsonResponse(id, innerHtml);
         }
         catch(error) {
             log("Error when attempting to parse form upload response (" + error.message + ")", "error");
@@ -5911,15 +6028,15 @@ qq.UploadHandlerForm = function(options, proxy) {
      * Creates form, that will be submitted to iframe
      */
     function createForm(id, iframe){
-        var params = options.paramsStore.getParams(id),
+        var params = options.paramsStore.get(id),
             method = options.demoMode ? "GET" : "POST",
-            endpoint = options.endpointStore.getEndpoint(id),
+            endpoint = options.endpointStore.get(id),
             name = getName(id);
 
         params[options.uuidName] = getUuid(id);
         params[options.filenameParam] = name;
 
-        return internalApi.initFormForUpload({
+        return handler._initFormForUpload({
             method: method,
             endpoint: endpoint,
             params: params,
@@ -5928,15 +6045,27 @@ qq.UploadHandlerForm = function(options, proxy) {
         });
     }
 
-    qq.extend(this, new qq.UploadHandlerFormApi(internalApi,
-        {fileState: fileState, isCors: options.cors.expected, inputName: options.inputName},
-        {onCancel: options.onCancel, onUuidChanged: onUuidChanged, getName: getName, getUuid: getUuid, log: log}));
+    qq.extend(this, new qq.AbstractUploadHandlerForm({
+            options: {
+                isCors: options.cors.expected,
+                inputName: options.inputName
+            },
+        
+            proxy: {
+                onCancel: options.onCancel,
+                onUuidChanged: onUuidChanged,
+                getName: getName,
+                getUuid: getUuid,
+                log: log
+            }
+        }
+    ));
 
     qq.extend(this, {
         upload: function(id) {
-            var input = fileState[id].input,
+            var input = handler._getFileState(id).input,
                 fileName = getName(id),
-                iframe = internalApi.createIframe(id),
+                iframe = handler._createIframe(id),
                 form;
 
             if (!input){
@@ -5948,12 +6077,12 @@ qq.UploadHandlerForm = function(options, proxy) {
             form = createForm(id, iframe);
             form.appendChild(input);
 
-            internalApi.attachLoadEvent(iframe, function(responseFromMessage){
+            handler._attachLoadEvent(iframe, function(responseFromMessage){
                 log("iframe loaded");
 
                 var response = responseFromMessage ? responseFromMessage : getIframeContentJson(id, iframe);
 
-                internalApi.detachLoadEvent(id);
+                handler._detachLoadEvent(id);
 
                 //we can't remove an iframe if the iframe doesn't belong to the same domain
                 if (!options.cors.expected) {
@@ -5993,13 +6122,11 @@ qq.UploadHandlerXhr = function(spec, proxy) {
         getUuid = proxy.getUuid,
         getSize = proxy.getSize,
         log = proxy.log,
-        fileState = [],
         cookieItemDelimiter = "|",
         chunkFiles = spec.chunking.enabled && qq.supportedFeatures.chunking,
         resumeEnabled = spec.resume.enabled && chunkFiles && qq.supportedFeatures.resume,
         multipart = spec.forceMultipart || spec.paramsInBody,
-        internalApi = {},
-        publicApi = this,
+        handler = this,
         resumeId;
 
     function getResumeId() {
@@ -6052,7 +6179,7 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     function setParamsAndGetEntityToSend(params, xhr, fileOrBlob, id) {
         var formData = new FormData(),
             method = spec.demoMode ? "GET" : "POST",
-            endpoint = spec.endpointStore.getEndpoint(id),
+            endpoint = spec.endpointStore.get(id),
             url = endpoint,
             name = getName(id),
             size = getSize(id);
@@ -6093,7 +6220,7 @@ qq.UploadHandlerXhr = function(spec, proxy) {
 
     function setHeaders(id, xhr) {
         var extraHeaders = spec.customHeaders,
-            fileOrBlob = fileState[id].file || fileState[id].blobData.blob;
+            fileOrBlob = handler._getFileState(id).file || handler._getFileState(id).blobData.blob;
 
         xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
         xhr.setRequestHeader("Cache-Control", "no-cache");
@@ -6113,31 +6240,31 @@ qq.UploadHandlerXhr = function(spec, proxy) {
         var name = getName(id),
             size = getSize(id);
 
-        fileState[id].attemptingResume = false;
+        handler._getFileState(id).attemptingResume = false;
 
         spec.onProgress(id, name, size, size);
         spec.onComplete(id, name, response, xhr);
 
-        if (fileState[id]) {
-            delete fileState[id].xhr;
+        if (handler._getFileState(id)) {
+            delete handler._getFileState(id).xhr;
         }
 
         uploadComplete(id);
     }
 
     function uploadNextChunk(id) {
-        var chunkIdx = fileState[id].remainingChunkIdxs[0],
-            chunkData = internalApi.getChunkData(id, chunkIdx),
-            xhr = internalApi.createXhr(id),
+        var chunkIdx = handler._getFileState(id).remainingChunkIdxs[0],
+            chunkData = handler._getChunkData(id, chunkIdx),
+            xhr = handler._createXhr(id),
             size = getSize(id),
             name = getName(id),
             toSend, params;
 
-        if (fileState[id].loaded === undefined) {
-            fileState[id].loaded = 0;
+        if (handler._getFileState(id).loaded === undefined) {
+            handler._getFileState(id).loaded = 0;
         }
 
-        if (resumeEnabled && fileState[id].file) {
+        if (resumeEnabled && handler._getFileState(id).file) {
             persistChunkData(id, chunkData);
         }
 
@@ -6145,19 +6272,19 @@ qq.UploadHandlerXhr = function(spec, proxy) {
 
         xhr.upload.onprogress = function(e) {
             if (e.lengthComputable) {
-                var totalLoaded = e.loaded + fileState[id].loaded,
+                var totalLoaded = e.loaded + handler._getFileState(id).loaded,
                     estTotalRequestsSize = calcAllRequestsSizeForChunkedUpload(id, chunkIdx, e.total);
 
                 spec.onProgress(id, name, totalLoaded, estTotalRequestsSize);
             }
         };
 
-        spec.onUploadChunk(id, name, internalApi.getChunkDataForCallback(chunkData));
+        spec.onUploadChunk(id, name, handler._getChunkDataForCallback(chunkData));
 
-        params = spec.paramsStore.getParams(id);
+        params = spec.paramsStore.get(id);
         addChunkingSpecificParams(id, params, chunkData);
 
-        if (fileState[id].attemptingResume) {
+        if (handler._getFileState(id).attemptingResume) {
             addResumeSpecificParams(params);
         }
 
@@ -6169,32 +6296,32 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     }
 
     function calcAllRequestsSizeForChunkedUpload(id, chunkIdx, requestSize) {
-        var chunkData = internalApi.getChunkData(id, chunkIdx),
+        var chunkData = handler._getChunkData(id, chunkIdx),
             blobSize = chunkData.size,
             overhead = requestSize - blobSize,
             size = getSize(id),
             chunkCount = chunkData.count,
-            initialRequestOverhead = fileState[id].initialRequestOverhead,
+            initialRequestOverhead = handler._getFileState(id).initialRequestOverhead,
             overheadDiff = overhead - initialRequestOverhead;
 
-        fileState[id].lastRequestOverhead = overhead;
+        handler._getFileState(id).lastRequestOverhead = overhead;
 
         if (chunkIdx === 0) {
-            fileState[id].lastChunkIdxProgress = 0;
-            fileState[id].initialRequestOverhead = overhead;
-            fileState[id].estTotalRequestsSize = size + (chunkCount * overhead);
+            handler._getFileState(id).lastChunkIdxProgress = 0;
+            handler._getFileState(id).initialRequestOverhead = overhead;
+            handler._getFileState(id).estTotalRequestsSize = size + (chunkCount * overhead);
         }
-        else if (fileState[id].lastChunkIdxProgress !== chunkIdx) {
-            fileState[id].lastChunkIdxProgress = chunkIdx;
-            fileState[id].estTotalRequestsSize += overheadDiff;
+        else if (handler._getFileState(id).lastChunkIdxProgress !== chunkIdx) {
+            handler._getFileState(id).lastChunkIdxProgress = chunkIdx;
+            handler._getFileState(id).estTotalRequestsSize += overheadDiff;
         }
 
-        return fileState[id].estTotalRequestsSize;
+        return handler._getFileState(id).estTotalRequestsSize;
     }
 
     function getLastRequestOverhead(id) {
         if (multipart) {
-            return fileState[id].lastRequestOverhead;
+            return handler._getFileState(id).lastRequestOverhead;
         }
         else {
             return 0;
@@ -6202,15 +6329,15 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     }
 
     function handleSuccessfullyCompletedChunk(id, response, xhr) {
-        var chunkIdx = fileState[id].remainingChunkIdxs.shift(),
-            chunkData = internalApi.getChunkData(id, chunkIdx);
+        var chunkIdx = handler._getFileState(id).remainingChunkIdxs.shift(),
+            chunkData = handler._getChunkData(id, chunkIdx);
 
-        fileState[id].attemptingResume = false;
-        fileState[id].loaded += chunkData.size + getLastRequestOverhead(id);
+        handler._getFileState(id).attemptingResume = false;
+        handler._getFileState(id).loaded += chunkData.size + getLastRequestOverhead(id);
 
-        spec.onUploadChunkSuccess(id, internalApi.getChunkDataForCallback(chunkData), response, xhr);
+        spec.onUploadChunkSuccess(id, handler._getChunkDataForCallback(chunkData), response, xhr);
 
-        if (fileState[id].remainingChunkIdxs.length > 0) {
+        if (handler._getFileState(id).remainingChunkIdxs.length > 0) {
             uploadNextChunk(id);
         }
         else {
@@ -6251,20 +6378,20 @@ qq.UploadHandlerXhr = function(spec, proxy) {
 
         if (resumeEnabled) {
             deletePersistedChunkData(id);
-            fileState[id].attemptingResume = false;
+            handler._getFileState(id).attemptingResume = false;
         }
 
-        fileState[id].remainingChunkIdxs = [];
-        delete fileState[id].loaded;
-        delete fileState[id].estTotalRequestsSize;
-        delete fileState[id].initialRequestOverhead;
+        handler._getFileState(id).remainingChunkIdxs = [];
+        delete handler._getFileState(id).loaded;
+        delete handler._getFileState(id).estTotalRequestsSize;
+        delete handler._getFileState(id).initialRequestOverhead;
     }
 
     function handleResetResponseOnResumeAttempt(id) {
-        fileState[id].attemptingResume = false;
+        handler._getFileState(id).attemptingResume = false;
         log("Server has declared that it cannot handle resume for item ID " + id + " - starting from the first chunk", "error");
         handleResetResponse(id);
-        publicApi.upload(id, true);
+        handler.upload(id, true);
     }
 
     function handleNonResetErrorResponse(id, response, xhr) {
@@ -6274,12 +6401,16 @@ qq.UploadHandlerXhr = function(spec, proxy) {
             return;
         }
         else {
+            if (xhr.status !== 200) {
+                response.success = false;
+            }
+
             handleCompletedItem(id, response, xhr);
         }
     }
 
     function onComplete(id, xhr) {
-        var state = fileState[id],
+        var state = handler._getFileState(id),
             attemptingResume = state && state.attemptingResume,
             paused = state && state.paused,
             response;
@@ -6324,9 +6455,9 @@ qq.UploadHandlerXhr = function(spec, proxy) {
 
     function persistChunkData(id, chunkData) {
         var fileUuid = getUuid(id),
-            lastByteSent = fileState[id].loaded,
-            initialRequestOverhead = fileState[id].initialRequestOverhead,
-            estTotalRequestsSize = fileState[id].estTotalRequestsSize,
+            lastByteSent = handler._getFileState(id).loaded,
+            initialRequestOverhead = handler._getFileState(id).initialRequestOverhead,
+            estTotalRequestsSize = handler._getFileState(id).estTotalRequestsSize,
             cookieName = getChunkDataCookieName(id),
             cookieValue = fileUuid +
                 cookieItemDelimiter + chunkData.part +
@@ -6339,7 +6470,7 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     }
 
     function deletePersistedChunkData(id) {
-        if (fileState[id].file) {
+        if (handler._getFileState(id).file) {
             var cookieName = getChunkDataCookieName(id);
             qq.deleteCookie(cookieName);
         }
@@ -6392,8 +6523,8 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     function calculateRemainingChunkIdxsAndUpload(id, firstChunkIndex) {
         var currentChunkIndex;
 
-        for (currentChunkIndex = internalApi.getTotalChunks(id)-1; currentChunkIndex >= firstChunkIndex; currentChunkIndex-=1) {
-            fileState[id].remainingChunkIdxs.unshift(currentChunkIndex);
+        for (currentChunkIndex = handler._getTotalChunks(id)-1; currentChunkIndex >= firstChunkIndex; currentChunkIndex-=1) {
+            handler._getFileState(id).remainingChunkIdxs.unshift(currentChunkIndex);
         }
 
         uploadNextChunk(id);
@@ -6401,10 +6532,10 @@ qq.UploadHandlerXhr = function(spec, proxy) {
 
     function onResumeSuccess(id, name, firstChunkIndex, persistedChunkInfoForResume) {
         firstChunkIndex = persistedChunkInfoForResume.part;
-        fileState[id].loaded = persistedChunkInfoForResume.lastByteSent;
-        fileState[id].estTotalRequestsSize = persistedChunkInfoForResume.estTotalRequestsSize;
-        fileState[id].initialRequestOverhead = persistedChunkInfoForResume.initialRequestOverhead;
-        fileState[id].attemptingResume = true;
+        handler._getFileState(id).loaded = persistedChunkInfoForResume.lastByteSent;
+        handler._getFileState(id).estTotalRequestsSize = persistedChunkInfoForResume.estTotalRequestsSize;
+        handler._getFileState(id).initialRequestOverhead = persistedChunkInfoForResume.initialRequestOverhead;
+        handler._getFileState(id).attemptingResume = true;
         log("Resuming " + name + " at partition index " + firstChunkIndex);
 
         calculateRemainingChunkIdxsAndUpload(id, firstChunkIndex);
@@ -6412,10 +6543,10 @@ qq.UploadHandlerXhr = function(spec, proxy) {
 
     function handlePossibleResumeAttempt(id, persistedChunkInfoForResume, firstChunkIndex) {
         var name = getName(id),
-            firstChunkDataForResume = internalApi.getChunkData(id, persistedChunkInfoForResume.part),
+            firstChunkDataForResume = handler._getChunkData(id, persistedChunkInfoForResume.part),
             onResumeRetVal;
 
-        onResumeRetVal = spec.onResume(id, name, internalApi.getChunkDataForCallback(firstChunkDataForResume));
+        onResumeRetVal = spec.onResume(id, name, handler._getChunkDataForCallback(firstChunkDataForResume));
         if (onResumeRetVal instanceof qq.Promise) {
             log("Waiting for onResume promise to be fulfilled for " + id);
             onResumeRetVal.then(
@@ -6441,10 +6572,10 @@ qq.UploadHandlerXhr = function(spec, proxy) {
         var firstChunkIndex = 0,
             persistedChunkInfoForResume;
 
-        if (!fileState[id].remainingChunkIdxs || fileState[id].remainingChunkIdxs.length === 0) {
-            fileState[id].remainingChunkIdxs = [];
+        if (!handler._getFileState(id).remainingChunkIdxs || handler._getFileState(id).remainingChunkIdxs.length === 0) {
+            handler._getFileState(id).remainingChunkIdxs = [];
 
-            if (resumeEnabled && !retry && fileState[id].file) {
+            if (resumeEnabled && !retry && handler._getFileState(id).file) {
                 persistedChunkInfoForResume = getPersistedChunkData(id);
                 if (persistedChunkInfoForResume) {
                     handlePossibleResumeAttempt(id, persistedChunkInfoForResume, firstChunkIndex);
@@ -6463,24 +6594,24 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     }
 
     function handleStandardFileUpload(id) {
-        var fileOrBlob = fileState[id].file || fileState[id].blobData.blob,
+        var fileOrBlob = handler._getFileState(id).file || handler._getFileState(id).blobData.blob,
             name = getName(id),
             xhr, params, toSend;
 
-        fileState[id].loaded = 0;
+        handler._getFileState(id).loaded = 0;
 
-        xhr = internalApi.createXhr(id);
+        xhr = handler._createXhr(id);
 
         xhr.upload.onprogress = function(e){
             if (e.lengthComputable){
-                fileState[id].loaded = e.loaded;
+                handler._getFileState(id).loaded = e.loaded;
                 spec.onProgress(id, name, e.loaded, e.total);
             }
         };
 
         xhr.onreadystatechange = getReadyStateChangeHandler(id, xhr);
 
-        params = spec.paramsStore.getParams(id);
+        params = spec.paramsStore.get(id);
         toSend = setParamsAndGetEntityToSend(params, xhr, fileOrBlob, id);
         setHeaders(id, xhr);
 
@@ -6491,7 +6622,7 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     function handleUploadSignal(id, retry) {
         var name = getName(id);
 
-        if (publicApi.isValid(id)) {
+        if (handler.isValid(id)) {
             spec.onUpload(id, name);
 
             if (chunkFiles) {
@@ -6504,14 +6635,23 @@ qq.UploadHandlerXhr = function(spec, proxy) {
     }
 
 
-    qq.extend(this, new qq.UploadHandlerXhrApi(
-        internalApi,
-        {fileState: fileState, chunking: chunkFiles ? spec.chunking : null},
-        {onUpload: handleUploadSignal, onCancel: spec.onCancel, onUuidChanged: onUuidChanged, getName: getName,
-            getSize: getSize, getUuid: getUuid, log: log}
+    qq.extend(this, new qq.AbstractUploadHandlerXhr({
+            options: {
+                chunking: chunkFiles ? spec.chunking : null
+            },
+
+            proxy: {
+                onUpload: handleUploadSignal,
+                onCancel: spec.onCancel,
+                onUuidChanged: onUuidChanged,
+                getName: getName,
+                getSize: getSize,
+                getUuid: getUuid,
+                log: log
+            }
+        }
     ));
 
-    // Base XHR API overrides
     qq.override(this, function(super_) {
         return {
             add: function(id, fileOrBlobData) {
@@ -6756,9 +6896,14 @@ qq.DragAndDrop = function(o) {
                 qq(dropArea).removeClass(options.classes.dropActive);
             },
             onDrop: function(e){
-                handleDataTransfer(e.dataTransfer, dropZone).done(function() {
-                    uploadDroppedFiles(droppedFiles, dropZone);
-                });
+                handleDataTransfer(e.dataTransfer, dropZone).then(
+                    function() {
+                        uploadDroppedFiles(droppedFiles, dropZone);
+                    },
+                    function() {
+                        options.callbacks.dropLog("Drop event DataTransfer parsing failed.  No files will be uploaded.", "error");
+                    }
+                );
             }
         });
 
@@ -7086,7 +7231,7 @@ qq.DeleteFileAjaxRequester = function(o) {
         return {};
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         validMethods: ["POST", "DELETE"],
         method: options.method,
         endpointStore: options.endpointStore,
@@ -7099,7 +7244,7 @@ qq.DeleteFileAjaxRequester = function(o) {
         onSend: options.onDelete,
         onComplete: options.onDeleteComplete,
         cors: options.cors
-    });
+    }));
 
 
     qq.extend(this, {
@@ -8218,11 +8363,11 @@ qq.SessionAjaxRequester = function(spec) {
         options.onComplete(response, !isError, xhrOrXdr);
     }
 
-    requester = new qq.AjaxRequester({
+    requester = qq.extend(this, new qq.AjaxRequester({
         validMethods: ["GET"],
         method: "GET",
         endpointStore: {
-            getEndpoint: function() {
+            get: function() {
                 return options.endpoint;
             }
         },
@@ -8230,24 +8375,185 @@ qq.SessionAjaxRequester = function(spec) {
         log: options.log,
         onComplete: onComplete,
         cors: options.cors
-    });
+    }));
 
 
     qq.extend(this, {
         queryServer: function() {
             var params = qq.extend({}, options.params);
 
-            // cache buster, particularly for IE & iOS
-            params.qqtimestamp = new Date().getTime();
-
             options.log("Session query request.");
 
             requester.initTransport("sessionRefresh")
                 .withParams(params)
+                .withCacheBuster()
                 .send();
         }
     });
 };
+
+/* globals qq */
+/**
+ * Module that handles support for existing forms.
+ *
+ * @param options Options passed from the integrator-supplied options related to form support.
+ * @param startUpload Callback to invoke when files "stored" should be uploaded.
+ * @param log Proxy for the logger
+ * @constructor
+ */
+qq.FormSupport = function(options, startUpload, log) {
+    "use strict";
+    var self  = this,
+        interceptSubmit = options.interceptSubmit,
+        formEl = options.element,
+        autoUpload = options.autoUpload;
+
+    // Available on the public API associated with this module.
+    qq.extend(this, {
+        // To be used by the caller to determine if the endpoint will be determined by some processing
+        // that occurs in this module, such as if the form has an action attribute.
+        // Ignore if `attachToForm === false`.
+        newEndpoint: null,
+
+        // To be used by the caller to determine if auto uploading should be allowed.
+        // Ignore if `attachToForm === false`.
+        newAutoUpload: autoUpload,
+
+        // true if a form was detected and is being tracked by this module
+        attachedToForm: false,
+
+        // Returns an object with names and values for all valid form elements associated with the attached form.
+        getFormInputsAsObject: function() {
+            /* jshint eqnull:true */
+            if (formEl == null) {
+                return null;
+            }
+
+            return self._form2Obj(formEl);
+        }
+    });
+
+    // If the form contains an action attribute, this should be the new upload endpoint.
+    function determineNewEndpoint(formEl) {
+        if (formEl.getAttribute("action")) {
+            self.newEndpoint = formEl.getAttribute("action");
+        }
+    }
+
+    // Return true only if the form is valid, or if we cannot make this determination.
+    // If the form is invalid, ensure invalid field(s) are highlighted in the UI.
+    function validateForm(formEl, nativeSubmit) {
+        if (formEl.checkValidity && !formEl.checkValidity()) {
+            log("Form did not pass validation checks - will not upload.", "error");
+            nativeSubmit();
+        }
+        else {
+            return true;
+        }
+    }
+
+    // Intercept form submit attempts, unless the integrator has told us not to do this.
+    function maybeUploadOnSubmit(formEl) {
+        var nativeSubmit = formEl.submit;
+
+        // Intercept and squelch submit events.
+        qq(formEl).attach("submit", function(event) {
+            event = event || window.event;
+
+            if (event.preventDefault) {
+                event.preventDefault();
+            }
+            else {
+                event.returnValue = false;
+            }
+
+            validateForm(formEl, nativeSubmit) && startUpload();
+        });
+
+        // The form's `submit()` function may be called instead (i.e. via jQuery.submit()).
+        // Intercept that too.
+        formEl.submit = function() {
+            validateForm(formEl, nativeSubmit) && startUpload();
+        };
+    }
+
+    // If the element value passed from the uploader is a string, assume it is an element ID - select it.
+    // The rest of the code in this module depends on this being an HTMLElement.
+    function determineFormEl(formEl) {
+        if (formEl) {
+            if (qq.isString(formEl)) {
+                formEl = document.getElementById(formEl);
+            }
+
+            if (formEl) {
+                log("Attaching to form element.");
+                determineNewEndpoint(formEl);
+                interceptSubmit && maybeUploadOnSubmit(formEl);
+            }
+        }
+
+        return formEl;
+    }
+
+    formEl = determineFormEl(formEl);
+    this.attachedToForm = !!formEl;
+};
+
+qq.extend(qq.FormSupport.prototype, {
+    // Converts all relevant form fields to key/value pairs.  This is meant to mimic the data a browser will
+    // construct from a given form when the form is submitted.
+    _form2Obj: function(form) {
+        "use strict";
+        var obj = {},
+            notIrrelevantType = function(type) {
+                var irrelevantTypes = [
+                    "button",
+                    "image",
+                    "reset",
+                    "submit"
+                ];
+
+                return qq.indexOf(irrelevantTypes, type.toLowerCase()) < 0;
+            },
+            radioOrCheckbox = function(type) {
+                return qq.indexOf(["checkbox", "radio"], type.toLowerCase()) >= 0;
+            },
+            ignoreValue = function(el) {
+                if (radioOrCheckbox(el.type) && !el.checked) {
+                    return true;
+                }
+
+                return el.disabled && el.type.toLowerCase() !== "hidden";
+            },
+            selectValue = function(select) {
+                var value = null;
+
+                qq.each(qq(select).children(), function(idx, child) {
+                    if (child.tagName.toLowerCase() === "option" && child.selected) {
+                        value = child.value;
+                        return false;
+                    }
+                });
+
+                return value;
+            };
+
+        qq.each(form.elements, function(idx, el) {
+            if (qq.isInput(el, true) && notIrrelevantType(el.type) && !ignoreValue(el)) {
+                obj[el.name] = el.value;
+            }
+            else if (el.tagName.toLowerCase() === "select" && !ignoreValue(el)) {
+                var value = selectValue(el);
+
+                if (value !== null) {
+                    obj[el.name] = value;
+                }
+            }
+        });
+
+        return obj;
+    }
+});
 
 /*globals qq */
 // Base handler for UI (FineUploader mode) events.
@@ -8545,13 +8851,11 @@ qq.FilenameEditHandler = function(s, inheritedInternalApi) {
         pluginOptions = ["uploaderType", "endpointType"];
 
     function init(options) {
-        if (options) {
-            var xformedOpts = transformVariables(options),
-                newUploaderInstance = getNewUploaderInstance(xformedOpts);
+        var xformedOpts = transformVariables(options || {}),
+            newUploaderInstance = getNewUploaderInstance(xformedOpts);
 
-            uploader(newUploaderInstance);
-            addCallbacks(xformedOpts, newUploaderInstance);
-        }
+        uploader(newUploaderInstance);
+        addCallbacks(xformedOpts, newUploaderInstance);
 
         return $el;
     }
