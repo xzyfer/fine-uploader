@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 4.4.0
+* Version: 5.0.0
 *
 * Homepage: http://fineuploader.com
 *
@@ -109,9 +109,6 @@
     color: #000000;
 }
 
-.qq-upload-retryable .qq-upload-retry {
-    display: inline;
-}
 .qq-upload-size, .qq-upload-cancel, .qq-upload-retry,
 .qq-upload-delete, .qq-upload-pause, .qq-upload-continue {
     font-size: 12px;
