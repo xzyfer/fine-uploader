@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 5.0.0
+* Version: 5.0.1
 *
 * Homepage: http://fineuploader.com
 *
@@ -822,7 +822,7 @@ var qq = function(element) {
 }());
 
 /*global qq */
-qq.version="5.0.0";
+qq.version="5.0.1";
 
 /* globals qq */
 qq.supportedFeatures = (function () {
@@ -4022,8 +4022,10 @@ qq.UploadHandlerController = function(o, namespace) {
 
             log("All chunks have been uploaded for " + id + " - finalizing....");
             handler.finalizeChunks(id).then(
-                function(xhr) {
-                    var normaizedResponse = upload.normalizeResponse({}, true);
+                function(response, xhr) {
+                    log("Finalize successful for " + id);
+
+                    var normaizedResponse = upload.normalizeResponse(response, true);
 
                     options.onProgress(id, name, size, size);
                     handler._maybeDeletePersistedChunkData(id);
@@ -5046,8 +5048,15 @@ qq.XhrUploadHandler = function(spec) {
 
         // Called when all chunks have been successfully uploaded.  Expected promissory return type.
         // This defines the default behavior if nothing further is required when all chunks have been uploaded.
-        finalizeChunks: function(id) {
-            return new qq.Promise().success(handler._getXhr(id));
+        finalizeChunks: function(id, responseParser) {
+            var lastChunkIdx = handler._getTotalChunks(id) - 1,
+                xhr = handler._getXhr(id, lastChunkIdx);
+
+            if (responseParser) {
+                return new qq.Promise().success(responseParser(xhr), xhr);
+            }
+
+            return new qq.Promise().success({}, xhr);
         },
 
         getFile: function(id) {
@@ -7411,7 +7420,7 @@ qq.traditional.XhrUploadHandler = function(spec, proxy) {
             log("xhr - server response received for " + id);
             log("responseText = " + xhr.responseText);
 
-            response = parseResponse(xhr, true);
+            response = parseResponse(true, xhr);
 
             return {
                 success: !isErrorUploadResponse(xhr, response),
@@ -7420,7 +7429,7 @@ qq.traditional.XhrUploadHandler = function(spec, proxy) {
         },
 
         // If this is an upload response, we require a JSON payload, otherwise, it is optional.
-        parseResponse = function(xhr, upload) {
+        parseResponse = function(upload, xhr) {
             var response = {};
 
             try {
@@ -7444,9 +7453,9 @@ qq.traditional.XhrUploadHandler = function(spec, proxy) {
                     spec.customHeaders.get(id)
                 )
                 .then(function(xhr) {
-                    promise.success(parseResponse(xhr), xhr);
+                    promise.success(parseResponse(false, xhr), xhr);
                 }, function(xhr) {
-                    promise.failure(parseResponse(xhr), xhr);
+                    promise.failure(parseResponse(false, xhr), xhr);
                 });
 
             return promise;
@@ -7563,7 +7572,9 @@ qq.traditional.XhrUploadHandler = function(spec, proxy) {
                 if (spec.chunking.success.endpoint) {
                     return sendChunksCompleteRequest(id);
                 }
-                return super_.finalizeChunks(id);
+                else {
+                    return super_.finalizeChunks(id, qq.bind(parseResponse, this, true));
+                }
             }
         };
     });
