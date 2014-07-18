@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 5.0.3
+* Version: 5.0.4-0
 *
 * Homepage: http://fineuploader.com
 *
@@ -5364,6 +5364,7 @@ qq.XhrUploadHandler = function(spec) {
 
         _registerProgressHandler: function(id, chunkIdx, chunkSize) {
             var xhr = handler._getXhr(id, chunkIdx),
+                name = getName(id),
                 progressCalculator = {
                     simple: function(loaded, total) {
                         var fileSize = getSize(id);
