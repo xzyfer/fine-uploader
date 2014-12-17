@@ -3,7 +3,7 @@
 *
 * Copyright 2013, Widen Enterprises, Inc. info@fineuploader.com
 *
-* Version: 5.0.4-0
+* Version: 5.0.9
 *
 * Homepage: http://fineuploader.com
 *
@@ -483,11 +483,16 @@ var qq = function(element) {
     //
     // Browsers and platforms detection
     qq.ie = function() {
-        return navigator.userAgent.indexOf("MSIE") !== -1;
+        return navigator.userAgent.indexOf("MSIE") !== -1 ||
+            navigator.userAgent.indexOf("Trident") !== -1;
     };
 
     qq.ie7 = function() {
         return navigator.userAgent.indexOf("MSIE 7") !== -1;
+    };
+
+    qq.ie8 = function() {
+        return navigator.userAgent.indexOf("MSIE 8") !== -1;
     };
 
     qq.ie10 = function() {
@@ -495,8 +500,7 @@ var qq = function(element) {
     };
 
     qq.ie11 = function() {
-        return (navigator.userAgent.indexOf("Trident") !== -1 &&
-            navigator.userAgent.indexOf("rv:11") !== -1);
+        return qq.ie() && navigator.userAgent.indexOf("rv:11") !== -1;
     };
 
     qq.safari = function() {
@@ -529,8 +533,21 @@ var qq = function(element) {
         return qq.android() && navigator.userAgent.toLowerCase().indexOf("chrome") < 0;
     };
 
+    qq.ios6 = function() {
+        return qq.ios() && navigator.userAgent.indexOf(" OS 6_") !== -1;
+    };
+
     qq.ios7 = function() {
         return qq.ios() && navigator.userAgent.indexOf(" OS 7_") !== -1;
+    };
+
+    qq.ios8 = function() {
+        return qq.ios() && navigator.userAgent.indexOf(" OS 8_") !== -1;
+    };
+
+    // iOS 8.0.0
+    qq.ios800 = function() {
+        return qq.ios() && navigator.userAgent.indexOf(" OS 8_0 ") !== -1;
     };
 
     qq.ios = function() {
@@ -538,6 +555,18 @@ var qq = function(element) {
         return navigator.userAgent.indexOf("iPad") !== -1
             || navigator.userAgent.indexOf("iPod") !== -1
             || navigator.userAgent.indexOf("iPhone") !== -1;
+    };
+
+    qq.iosChrome = function() {
+        return qq.ios() && navigator.userAgent.indexOf("CriOS") !== -1;
+    };
+
+    qq.iosSafari = function() {
+        return qq.ios() && !qq.iosChrome() && navigator.userAgent.indexOf("Safari") !== -1;
+    };
+
+    qq.iosSafariWebView = function() {
+        return qq.ios() && !qq.iosChrome() && !qq.iosSafari();
     };
 
     //
@@ -822,7 +851,7 @@ var qq = function(element) {
 }());
 
 /*global qq */
-qq.version="5.0.3";
+qq.version="5.0.9";
 
 /* globals qq */
 qq.supportedFeatures = (function () {
@@ -908,6 +937,16 @@ qq.supportedFeatures = (function () {
         return document.createElement("input").webkitdirectory !== undefined;
     }
 
+    function isLocalStorageSupported () {
+        try {
+            return !!window.localStorage;
+        }
+        catch (error) {
+            // probably caught a security exception, so no localStorage for you
+            return false;
+        }
+    }
+
 
     supportsUploading = testSupportsFileInputElement();
 
@@ -919,7 +958,7 @@ qq.supportedFeatures = (function () {
 
     supportsChunking = supportsAjaxFileUploading && qq.isFileChunkingSupported();
 
-    supportsResume = supportsAjaxFileUploading && supportsChunking && !!window.localStorage;
+    supportsResume = supportsAjaxFileUploading && supportsChunking && isLocalStorageSupported();
 
     supportsUploadViaPaste = supportsAjaxFileUploading && isChrome14OrHigher();
 
@@ -937,8 +976,7 @@ qq.supportedFeatures = (function () {
 
     supportsUploadProgress = (function() {
         if (supportsAjaxFileUploading) {
-            return !qq.androidStock() &&
-                !(qq.ios() && navigator.userAgent.indexOf("CriOS") >= 0);
+            return !qq.androidStock() && !qq.iosChrome();
         }
         return false;
     }());
@@ -1098,7 +1136,9 @@ qq.UploadButton = function(o) {
     "use strict";
 
 
-    var disposeSupport = new qq.DisposeSupport(),
+    var self = this,
+
+        disposeSupport = new qq.DisposeSupport(),
 
         options = {
             // "Container" element
@@ -1119,6 +1159,8 @@ qq.UploadButton = function(o) {
             // Called when the browser invokes the onchange handler on the `<input type="file">`
             onChange: function(input) {},
 
+            ios8BrowserCrashWorkaround: true,
+
             // **This option will be removed** in the future as the :hover CSS pseudo-class is available on all supported browsers
             hoverClass: "qq-upload-button-hover",
 
@@ -1137,9 +1179,7 @@ qq.UploadButton = function(o) {
 
         input.setAttribute(qq.UploadButton.BUTTON_ID_ATTR_NAME, buttonId);
 
-        if (options.multiple) {
-            input.setAttribute("multiple", "");
-        }
+        self.setMultiple(options.multiple, input);
 
         if (options.folders && qq.supportedFeatures.folderSelection) {
             // selecting directories is only possible in Chrome now, via a vendor-specific prefixed attribute
@@ -1161,13 +1201,24 @@ qq.UploadButton = function(o) {
             right: 0,
             top: 0,
             fontFamily: "Arial",
-            // 4 persons reported this, the max values that worked for them were 243, 236, 236, 118
-            fontSize: "118px",
+            // It's especially important to make this an arbitrarily large value 
+            // to ensure the rendered input button in IE takes up the entire 
+            // space of the container element.  Otherwise, the left side of the 
+            // button will require a double-click to invoke the file chooser.
+            // In other browsers, this might cause other issues, so a large font-size
+            // is only used in IE.  There is a bug in IE8 where the opacity style is  ignored
+            // in some cases when the font-size is large.  So, this workaround is not applied
+            // to IE8.
+            fontSize: qq.ie() && !qq.ie8() ? "3500px" : "118px",
             margin: 0,
             padding: 0,
             cursor: "pointer",
             opacity: 0
         });
+        
+        // Setting the file input's height to 100% in IE7 causes 
+        // most of the visible button to be unclickable.
+        !qq.ie7() && qq(input).css({height: "100%"});
 
         options.element.appendChild(input);
 
@@ -1208,9 +1259,6 @@ qq.UploadButton = function(o) {
         direction: "ltr"
     });
 
-    input = createInput();
-
-
     // Exposed API
     qq.extend(this, {
         getInput: function() {
@@ -1221,8 +1269,17 @@ qq.UploadButton = function(o) {
             return buttonId;
         },
 
-        setMultiple: function(isMultiple) {
-            if (isMultiple !== options.multiple) {
+        setMultiple: function(isMultiple, opt_input) {
+            var input = opt_input || this.getInput();
+
+            // Temporary workaround for bug in in iOS8 UIWebView that causes the browser to crash
+            // before the file chooser appears if the file input doesn't contain a multiple attribute.
+            // See #1283.
+            if (options.ios8BrowserCrashWorkaround && qq.ios8() && (qq.iosChrome() || qq.iosSafariWebView())) {
+                input.setAttribute("multiple", "");
+            }
+
+            else {
                 if (isMultiple) {
                     input.setAttribute("multiple", "");
                 }
@@ -1244,9 +1301,12 @@ qq.UploadButton = function(o) {
             }
 
             qq(options.element).removeClass(options.focusClass);
+            input = null;
             input = createInput();
         }
     });
+
+    input = createInput();
 };
 
 qq.UploadButton.BUTTON_ID_ATTR_NAME = "qq-button-id";
@@ -1473,6 +1533,8 @@ qq.status = {
                 throw new qq.Error("Blob uploading is not supported in this browser!");
             }
 
+            this._maybeHandleIos8SafariWorkaround();
+
             if (blobDataOrArray) {
                 var blobDataArray = [].concat(blobDataOrArray),
                     verifiedBlobDataList = [],
@@ -1508,6 +1570,8 @@ qq.status = {
         },
 
         addFiles: function(filesOrInputs, params, endpoint) {
+            this._maybeHandleIos8SafariWorkaround();
+
             var verifiedFilesOrInputs = [],
                 batchId = this._storedIds.length === 0 ? qq.getUniqueId() : this._currentBatchId,
                 fileOrInputIndex, fileOrInput, fileIndex;
@@ -2024,8 +2088,12 @@ qq.status = {
 
             function allowMultiple() {
                 if (qq.supportedFeatures.ajaxUploading) {
-                    // Workaround for bug in iOS7 (see #1039)
-                    if (qq.ios7() && self._isAllowedExtension(allowedExtensions, ".mov")) {
+                    // Workaround for bug in iOS7+ (see #1039)
+                    if (self._options.workarounds.iosEmptyVideos &&
+                        qq.ios() &&
+                        !qq.ios6() &&
+                        self._isAllowedExtension(allowedExtensions, ".mov")) {
+
                         return false;
                     }
 
@@ -2049,7 +2117,8 @@ qq.status = {
                     self._onInputChange(input);
                 },
                 hoverClass: this._options.classes.buttonHover,
-                focusClass: this._options.classes.buttonFocus
+                focusClass: this._options.classes.buttonFocus,
+                ios8BrowserCrashWorkaround: this._options.workarounds.ios8BrowserCrash
             });
 
             this._disposeSupport.addDisposer(function() {
@@ -2077,6 +2146,10 @@ qq.status = {
                     log: qq.bind(self.log, self),
                     preventRetryParam: this._options.retry.preventRetryResponseProperty,
                     onProgress: function(id, name, loaded, total) {
+                        if (loaded < 0 || total < 0) {
+                            return;
+                        }
+
                         if (lastOnProgress[id]) {
                             if (lastOnProgress[id].loaded !== loaded || lastOnProgress[id].total !== total) {
                                 self._onProgress(id, name, loaded, total);
@@ -2634,6 +2707,17 @@ qq.status = {
             }
         },
 
+        _maybeHandleIos8SafariWorkaround: function() {
+            var self = this;
+
+            if (this._options.workarounds.ios8SafariUploads && qq.ios800() && qq.iosSafari()) {
+                setTimeout(function() {
+                    window.alert(self._options.messages.unsupportedBrowserIos8Safari);
+                }, 0);
+                throw new qq.Error(this._options.messages.unsupportedBrowserIos8Safari);
+            }
+        },
+
         _maybeParseAndSendUploadError: function(id, name, response, xhr) {
             // Assuming no one will actually set the response code to something other than 200
             // and still set 'success' to true...
@@ -2655,11 +2739,13 @@ qq.status = {
                 if (validItem || !this._options.validation.stopOnFirstInvalidFile) {
                     //use setTimeout to prevent a stack overflow with a large number of files in the batch & non-promissory callbacks
                     setTimeout(function() {
-                        var validationDescriptor = self._getValidationDescriptor(items[index]);
+                        var validationDescriptor = self._getValidationDescriptor(items[index]),
+                            buttonId = self._getButtonId(items[index].file),
+                            button = self._getButton(buttonId);
 
                         self._handleCheckedCallback({
                             name: "onValidate",
-                            callback: qq.bind(self._options.callbacks.onValidate, self, items[index].file),
+                            callback: qq.bind(self._options.callbacks.onValidate, self, validationDescriptor, button),
                             onSuccess: qq.bind(self._onValidateCallbackSuccess, self, items, index, params, endpoint),
                             onFailure: qq.bind(self._onValidateCallbackFailure, self, items, index, params, endpoint),
                             identifier: "Item '" + validationDescriptor.name + "', size: " + validationDescriptor.size
@@ -3286,7 +3372,8 @@ qq.status = {
                 minHeightImageError: "Image is not tall enough.",
                 minWidthImageError: "Image is not wide enough.",
                 retryFailTooManyItems: "Retry failed - you have reached your file limit.",
-                onLeave: "The files are being uploaded, if you leave now the upload will be canceled."
+                onLeave: "The files are being uploaded, if you leave now the upload will be canceled.",
+                unsupportedBrowserIos8Safari: "Unrecoverable error - this browser does not permit file uploading of any kind due to serious bugs in iOS8 Safari.  Please use iOS8 Chrome until Apple fixes these issues."
             },
 
             retry: {
@@ -3419,6 +3506,12 @@ qq.status = {
 
                 // metadata about each requested scaled version
                 sizes: []
+            },
+
+            workarounds: {
+                iosEmptyVideos: true,
+                ios8SafariUploads: true,
+                ios8BrowserCrash: true
             }
         };
 
@@ -4248,8 +4341,26 @@ qq.UploadHandlerController = function(o, namespace) {
         getWaitingOrConnected: function() {
             var waitingOrConnected = [];
 
-            qq.each(waitingOrConnected, connectionManager._open);
-            return qq.each(waitingOrConnected, connectionManager._waiting);
+            // Chunked files may have multiple connections open per chunk (if concurrent chunking is enabled)
+            // We need to grab the file ID of any file that has at least one chunk consuming a connection.
+            qq.each(connectionManager._openChunks, function(fileId, chunks) {
+                if (chunks && chunks.length) {
+                    waitingOrConnected.push(parseInt(fileId));
+                }
+            });
+
+            // For non-chunked files, only one connection will be consumed per file.
+            // This is where we aggregate those file IDs.
+            qq.each(connectionManager._open, function(idx, fileId) {
+                if (!connectionManager._openChunks[fileId]) {
+                    waitingOrConnected.push(parseInt(fileId));
+                }
+            });
+
+            // There may be files waiting for a connection.
+            waitingOrConnected = waitingOrConnected.concat(connectionManager._waiting);
+
+            return waitingOrConnected;
         },
 
         isUsingConnection: function(id) {
@@ -4569,9 +4680,13 @@ qq.UploadHandlerController = function(o, namespace) {
         cancelAll: function() {
             var waitingOrConnected = connectionManager.getWaitingOrConnected();
 
-            qq.each(waitingOrConnected, function(idx, fileId) {
-                controller.cancel(fileId);
-            });
+            // ensure files are cancelled in reverse order which they were added
+            // to avoid a flash of time where a queued file begins to upload before it is canceled
+            if (waitingOrConnected.length) {
+                for (var i = waitingOrConnected.length-1; i >= 0; i--) {
+                    controller.cancel(waitingOrConnected[i]);
+                }
+            }
 
             connectionManager.reset();
         },
@@ -4787,7 +4902,7 @@ qq.FormUploadHandler = function(spec) {
         corsMessageReceiver.receiveMessage(iframeName, function(message) {
             log("Received the following window message: '" + message + "'");
             var fileId = getFileIdForIframeName(iframeName),
-                response = handler._parseJsonResponse(fileId, message),
+                response = handler._parseJsonResponse(message),
                 uuid = response.uuid,
                 onloadCallback;
 
@@ -4841,6 +4956,10 @@ qq.FormUploadHandler = function(spec) {
     });
 
     qq.extend(this, {
+        getInput: function(id) {
+            return handler._getFileState(id).input;
+        },
+
         /**
          * This function either delegates to a more specific message handler if CORS is involved,
          * or simply registers a callback when the iframe has been loaded that invokes the passed callback
@@ -4922,10 +5041,6 @@ qq.FormUploadHandler = function(spec) {
             return fileId + "_" + formHandlerInstanceId;
         },
 
-        getInput: function(id) {
-            return handler._getFileState(id).input;
-        },
-
         /**
          * Generates a form element and appends it to the `document`.  When the form is submitted, a specific iframe is targeted.
          * The name of the iframe is passed in as a property of the spec parameter, and must be unique in the `document`.  Note
@@ -4957,6 +5072,23 @@ qq.FormUploadHandler = function(spec) {
             document.body.appendChild(form);
 
             return form;
+        },
+        
+        /**
+         * @param innerHtmlOrMessage JSON message
+         * @returns {*} The parsed response, or an empty object if the response could not be parsed
+         */
+        _parseJsonResponse: function(innerHtmlOrMessage) {
+            var response = {};
+    
+            try {
+                response = qq.parseJson(innerHtmlOrMessage);
+            }
+            catch(error) {
+                log("Error when attempting to parse iframe upload response (" + error.message + ")", "error");
+            }
+    
+            return response;
         }
     });
 };
@@ -6049,9 +6181,19 @@ qq.WindowReceiveMessage = function(o) {
                     this._templating.disableCancel();
                 }
 
+                // Cancel all existing (previous) files and clear the list if this file is not part of 
+                // a scaled file group that has already been accepted, or if this file is not part of 
+                // a scaled file group at all.
                 if (!this._options.multiple) {
-                    this._handler.cancelAll();
-                    this._clearList();
+                    var record = this.getUploads({id: id});
+                    
+                    this._handledProxyGroup = this._handledProxyGroup || record.proxyGroupId;
+
+                    if (record.proxyGroupId !== this._handledProxyGroup || !record.proxyGroupId) {
+                        this._handler.cancelAll();
+                        this._clearList();
+                        this._handledProxyGroup = null;
+                    }
                 }
             }
 
@@ -6328,7 +6470,10 @@ qq.FineUploader = function(o, namespace) {
         text: this._options.text
     });
 
-    if (!qq.supportedFeatures.uploading || (this._options.cors.expected && !qq.supportedFeatures.uploadCors)) {
+    if (this._options.workarounds.ios8SafariUploads && qq.ios800() && qq.iosSafari()) {
+        this._templating.renderFailure(this._options.messages.unsupportedBrowserIos8Safari);
+    }
+    else if (!qq.supportedFeatures.uploading || (this._options.cors.expected && !qq.supportedFeatures.uploadCors)) {
         this._templating.renderFailure(this._options.messages.unsupportedBrowser);
     }
     else {
@@ -7215,23 +7360,6 @@ qq.traditional.FormUploadHandler = function(options, proxy) {
         log = proxy.log;
 
     /**
-     * @param innerHtmlOrMessage JSON message
-     * @returns {*} The parsed response, or an empty object if the response could not be parsed
-     */
-    function parseJsonResponse(innerHtmlOrMessage) {
-        var response = {};
-
-        try {
-            response = qq.parseJson(innerHtmlOrMessage);
-        }
-        catch(error) {
-            log("Error when attempting to parse iframe upload response (" + error.message + ")", "error");
-        }
-
-        return response;
-    }
-
-    /**
      * Returns json object received by iframe from server.
      */
     function getIframeContentJson(id, iframe) {
@@ -7252,7 +7380,7 @@ qq.traditional.FormUploadHandler = function(options, proxy) {
                 innerHtml = doc.body.firstChild.firstChild.nodeValue;
             }
 
-            response = parseJsonResponse(innerHtml);
+            response = handler._parseJsonResponse(innerHtml);
         }
         catch(error) {
             log("Error when attempting to parse form upload response (" + error.message + ")", "error");
@@ -7679,7 +7807,7 @@ qq.PasteSupport = function(o) {
     }
 
     function registerPasteHandler() {
-        qq(options.targetElement).attach("paste", function(event) {
+        detachPasteHandler = qq(options.targetElement).attach("paste", function(event) {
             var clipboardData = event.clipboardData;
 
             if (clipboardData) {
@@ -7953,7 +8081,7 @@ qq.DragAndDrop = function(o) {
             var uploadDropZone = setupDropzone(dropZone);
 
             // IE <= 9 does not support the File API used for drag+drop uploads
-            if (dropZones.length && (!qq.ie() || qq.ie10())) {
+            if (dropZones.length && qq.supportedFeatures.fileDrop) {
                 disposeSupport.attach(document, "dragenter", function(e) {
                     if (!uploadDropZone.dropDisabled() && isFileDrag(e)) {
                         qq.each(dropZones, function(idx, dropZone) {
@@ -8078,7 +8206,7 @@ qq.UploadDropZone = function(o){
     function isValidFileDrag(e){
         // e.dataTransfer currently causing IE errors
         // IE9 does NOT support file API, so drag-and-drop is not possible
-        if (qq.ie() && !qq.ie10()) {
+        if (!qq.supportedFeatures.fileDrop) {
             return false;
         }
 
@@ -8089,9 +8217,9 @@ qq.UploadDropZone = function(o){
         // dt.effectAllowed is none in Safari 5
         // dt.types.contains check is for firefox
 
-        // dt.effectAllowed crashes IE11 when files have been dragged from
+        // dt.effectAllowed crashes IE 11 & 10 when files have been dragged from
         // the filesystem
-        effectTest = (qq.ie10() || qq.ie11()) ? true : dt.effectAllowed !== "none";
+        effectTest = qq.ie() && qq.supportedFeatures.fileDrop ? true : dt.effectAllowed !== "none";
         return dt && effectTest && (dt.files || (!isSafari && dt.types.contains && dt.types.contains("Files")));
     }
 
@@ -8131,9 +8259,9 @@ qq.UploadDropZone = function(o){
                 return;
             }
 
-            // dt.effectAllowed crashes IE11 when files have been dragged from
+            // dt.effectAllowed crashes IE 11 & 10 when files have been dragged from
             // the filesystem
-            var effect = (qq.ie() || qq.ie11()) ? null : e.dataTransfer.effectAllowed;
+            var effect = qq.ie() && qq.supportedFeatures.fileDrop ? null : e.dataTransfer.effectAllowed;
             if (effect === "move" || effect === "linkMove"){
                 e.dataTransfer.dropEffect = "move"; // for FF (only move allowed)
             } else {
@@ -9740,7 +9868,7 @@ qq.Scaler = function(spec, log) {
             return records;
         },
 
-        handleNewFile: function(file, name, uuid, size, fileList, uuidParamName, batchId, api) {
+        handleNewFile: function(file, name, uuid, size, fileList, batchId, uuidParamName, api) {
             var self = this,
                 buttonId = file.qqButtonId || (file.blob && file.blob.qqButtonId),
                 scaledIds = [],
@@ -9901,11 +10029,15 @@ qq.extend(qq.Scaler.prototype, {
         "use strict";
 
         var startOfExt = originalName.lastIndexOf("."),
-            nameAppendage = " (" + scaledVersionProperties.name + ")",
             versionType = scaledVersionProperties.type || "image/png",
             referenceType = scaledVersionProperties.refType,
             scaledName = "",
-            scaledExt = qq.getExtension(originalName);
+            scaledExt = qq.getExtension(originalName),
+            nameAppendage = "";
+
+        if (scaledVersionProperties.name && scaledVersionProperties.name.trim().length) {
+            nameAppendage = " (" + scaledVersionProperties.name + ")";
+        }
 
         if (startOfExt >= 0) {
             scaledName = originalName.substr(0, startOfExt);
