@@ -5,7 +5,7 @@ For version >= 5.1.0 use npm
 ```
 npm install fine-uploader
 ```
-~~~~
+***
 
 fine-uploader
 =============
